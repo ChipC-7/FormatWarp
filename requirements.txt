@@ -1,0 +1,10 @@
+PySide6>=6.5.0
+Pillow>=10.0.0
+pillow-heif>=0.13.0
+pillow-avif>=1.0.0
+pydub>=0.25.1
+python-docx>=0.8.11
+openpyxl>=3.1.0
+lxml>=4.9.0
+markdown>=3.4.0
+charset-normalizer>=3.0.0

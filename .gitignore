@@ -1,0 +1,28 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+venv/
+env/
+
+# deb 打包生成的临时文件和最终的 deb 包（deb包应该放在 Release 里，而不是源码里）
+deb_build/*.deb
+deb_build/FormatShift_1.0.0_amd64/DEBIAN/*.bak
+
+# 系统垃圾文件
+.DS_Store
+Thumbs.db
+*.swp
+
+# 忽略 PyInstaller 打包产物（超大）
+build/
+dist/
+
+# 忽略 deb 打包中间目录（超大）
+deb_build/
+
+# 忽略第三方大体积二进制文件（超过100MB）
+ffmpeg/linux-x64/
