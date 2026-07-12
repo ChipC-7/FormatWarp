@@ -19,7 +19,7 @@
 
 *(待补充：建议在此处插入 1-2 张软件运行时的精美截图)*
 <!-- 示例：![主界面](docs/screenshot_main.png) -->
-
+![软件图标](/home/tech/桌面/格式转换器/FormatShift.png)
 ## 🚀 快速开始
 
 ### 方式一：下载安装包（推荐普通用户）
@@ -38,57 +38,27 @@
 git clone https://github.com/ChipC-7/FormatShift.git
 cd FormatShift
 2. 创建并激活虚拟环境（推荐）
-bash
-
-编辑
-
-
 
 python -m venv venv
 source venv/bin/activate  # Windows 用户运行: venv\Scripts\activate
 3. 安装 Python 依赖
-bash
-
-编辑
-
-
 
 pip install -r requirements.txt
 4. 启动程序
-bash
-
-编辑
-
-
 
 python main.py
 ⚠️ 重要前置依赖：FFmpeg
 本软件的音视频转换功能深度依赖 FFmpeg。由于 FFmpeg 二进制文件体积较大（>100MB），未包含在源码中。请在运行源码前确保系统已安装 FFmpeg：
 Ubuntu / Debian:
-bash
-
-编辑
-
-
-
 sudo apt update && sudo apt install ffmpeg
+
 macOS (使用 Homebrew):
-bash
-
-编辑
-
-
-
 brew install ffmpeg
+
 Windows:
 请前往 FFmpeg 官网 下载构建包，并将 ffmpeg.exe 所在目录添加到系统的环境变量 PATH 中。
 📦 自行打包指南
 本项目使用 PyInstaller 进行打包。如需自行构建可执行文件：
-bash
-
-编辑
-
-
 
 # 确保已安装 pyinstaller
 pip install pyinstaller
