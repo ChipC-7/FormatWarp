@@ -16,10 +16,8 @@
 - 🚀 **批量处理**：支持多线程/多任务队列，大幅提升转换效率。
 
 ## 📸 软件截图
-
-*(待补充：建议在此处插入 1-2 张软件运行时的精美截图)*
-<!-- 示例：![主界面](docs/screenshot_main.png) -->
-![软件图标](/home/tech/桌面/格式转换器/FormatShift.png)
+![软件主界面](images/screenshot1.png "FormatShift 主界面")
+![软件图标](images/screenshot2.png )
 ## 🚀 快速开始
 
 ### 方式一：下载安装包（推荐普通用户）
