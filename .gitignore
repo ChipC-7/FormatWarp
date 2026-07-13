@@ -10,7 +10,7 @@ env/
 
 # deb 打包生成的临时文件和最终的 deb 包（deb包应该放在 Release 里，而不是源码里）
 deb_build/*.deb
-deb_build/FormatShift_1.0.0_amd64/DEBIAN/*.bak
+deb_build/FormatWarp_1.0.0_amd64/DEBIAN/*.bak
 
 # 系统垃圾文件
 .DS_Store
@@ -26,3 +26,8 @@ deb_build/
 
 # 忽略第三方大体积二进制文件（超过100MB）
 ffmpeg/linux-x64/
+
+# Python 打包缓存
+build/
+dist/
+*.spec.bak

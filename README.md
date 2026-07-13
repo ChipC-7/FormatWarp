@@ -1,4 +1,4 @@
-# 🔄 FormatShift - 格式跃迁
+# 🔄 FormatWarp - 格式跃迁
 
 > 一款基于 Python 开发的跨平台、多功能文件格式转换工具。支持音视频、图片、文档的批量高效转换，界面简洁，开箱即用。
 
@@ -16,14 +16,14 @@
 - 🚀 **批量处理**：支持多线程/多任务队列，大幅提升转换效率。
 
 ## 📸 软件截图
-![软件主界面](images/screenshot1.png "FormatShift 主界面")
+![软件主界面](images/screenshot1.png "FormatWarp 主界面")
 ![软件图标](images/screenshot2.png )
 ## 🚀 快速开始
 
 ### 方式一：下载安装包（推荐普通用户）
 
-请前往 [**Releases 发布页**](https://github.com/ChipC-7/FormatShift/releases) 下载对应操作系统的最新安装包：
-- **Linux (Debian/Ubuntu)**: 下载 `.deb` 文件，双击或使用 `sudo dpkg -i FormatShift_x.x.x_amd64.deb` 安装。
+请前往 [**Releases 发布页**](https://github.com/ChipC-7/FormatWarp/releases) 下载对应操作系统的最新安装包：
+- **Linux (Debian/Ubuntu)**: 下载 `.deb` 文件，双击或使用 `sudo dpkg -i FormatWarp_x.x.x_amd64.deb` 安装。
 - **Windows**: 下载 `.exe` 安装程序。
 - **macOS**: 下载 `.dmg` 或 `.pkg` 镜像。
 
@@ -33,8 +33,8 @@
 
 **1. 克隆本仓库**
 ```bash
-git clone https://github.com/ChipC-7/FormatShift.git
-cd FormatShift
+git clone https://github.com/ChipC-7/FormatWarp.git
+cd FormatWarp
 2. 创建并激活虚拟环境（推荐）
 
 python -m venv venv
@@ -62,7 +62,7 @@ Windows:
 pip install pyinstaller
 
 # 使用项目自带的 spec 文件进行打包
-pyinstaller FormatShift.spec
+pyinstaller FormatWarp.spec
 打包完成后，可执行文件将生成在 dist/ 目录下。
 🤝 贡献与反馈
 如果您在使用过程中遇到 Bug，或者有好的功能建议，欢迎：
