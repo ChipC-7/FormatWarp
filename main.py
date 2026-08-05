@@ -8,10 +8,10 @@ import shutil
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QListWidget, QListWidgetItem, QStackedWidget, QMessageBox, QLabel,
-    QPushButton, QFileDialog, QStatusBar
+    QPushButton, QFileDialog, QStatusBar, QDialog, QProgressBar
 )
 from PySide6.QtCore import Qt, QTimer, QSettings, QSize, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QColor
 
 from utils import APP_NAME, APP_VERSION, ORG_NAME, COLORS, FFmpegManager, get_main_stylesheet, apply_global_cjk_font, ThemeManager
 from audio_converter import AudioConverterWidget
@@ -22,13 +22,88 @@ from settings_widget import SettingsWidget
 from conversion_monitor import ConversionMonitorWidget
 from log_viewer import LogViewerWidget
 
+
+class LoadingDialog(QDialog):
+    """启动加载界面：显示应用名 + 进度条 + 当前状态文字。"""
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(APP_NAME)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog
+        )
+        self.setModal(True)
+        self.setFixedSize(440, 220)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 32, 32, 24)
+        layout.setSpacing(8)
+
+        # Logo + 应用名
+        title_label = QLabel(f"🛠️  {APP_NAME}")
+        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #eaeaea;")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title_label)
+
+        version_label = QLabel(f"v{APP_VERSION}")
+        version_label.setStyleSheet("font-size: 12px; color: #a0a0a0;")
+        version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(version_label)
+
+        layout.addStretch()
+
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(8)
+        layout.addWidget(self.progress_bar)
+
+        # 状态文字
+        self.status_label = QLabel("正在初始化…")
+        self.status_label.setStyleSheet("font-size: 12px; color: #a0a0a0;")
+        self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_label)
+
+        # 暗色背景 + 圆角（与默认主题一致）
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {COLORS['bg']};
+                border-radius: 12px;
+            }}
+            QProgressBar {{
+                background-color: {COLORS['card']};
+                border: 1px solid {COLORS['border']};
+                border-radius: 4px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {COLORS['success']};
+                border-radius: 4px;
+            }}
+        """)
+
+    def set_progress(self, value: int, status: str = ""):
+        """更新进度条与状态文字，并立即刷新 UI。"""
+        self.progress_bar.setValue(value)
+        if status:
+            self.status_label.setText(status)
+        QApplication.processEvents()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.setMinimumSize(1100, 750)
         self.resize(1200, 800)
-        
+
+        # 加载界面：先显示，覆盖整个初始化过程
+        self._loading = LoadingDialog()
+        self._loading.show()
+        QApplication.processEvents()
+
+        self._loading.set_progress(10, "加载用户偏好…")
         self.settings = QSettings(ORG_NAME, APP_NAME)
         self.ffmpeg_mgr = FFmpegManager()
 
@@ -38,17 +113,27 @@ class MainWindow(QMainWindow):
             saved_theme = "dark"
         self._saved_default_output_dir = (self.settings.value("Settings/default_output_dir", "") or "").strip()
 
+        self._loading.set_progress(25, "应用主题…")
         # 先让 ThemeManager 应用主题，确保创建 Widget 时 ThemeManager.instance().current_colors 已是正确值
         self._initial_colors = ThemeManager.instance().apply_theme(
             QApplication.instance(), saved_theme
         )
 
+        self._loading.set_progress(45, "初始化转换模块…")
         self._setup_ui()
+
+        self._loading.set_progress(75, "连接全局信号…")
         self._connect_global_signals()
+
+        self._loading.set_progress(90, "加载窗口设置…")
         self._load_settings()
-        
+
+        self._loading.set_progress(100, "启动完成")
+        # 至少显示 400ms，避免一闪而过
+        QTimer.singleShot(400, self._loading.close)
+
         # 延迟执行 FFmpeg 检测
-        QTimer.singleShot(500, self._check_ffmpeg)
+        QTimer.singleShot(600, self._check_ffmpeg)
 
     def _apply_widget_styles(self):
         c = ThemeManager.instance().current_colors
@@ -337,11 +422,12 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(ORG_NAME)
-    
+
     apply_global_cjk_font(app, font_size_px=13)
-    
+
     window = MainWindow()
     window.show()
+
     sys.exit(app.exec())
 
 if __name__ == "__main__":
