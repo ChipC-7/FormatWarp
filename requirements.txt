@@ -1,10 +1,66 @@
-PySide6>=6.5.0
-Pillow>=10.0.0
-pillow-heif>=0.13.0
-pillow-avif>=1.0.0
-pydub>=0.25.1
-python-docx>=0.8.11
-openpyxl>=3.1.0
-lxml>=4.9.0
-markdown>=3.4.0
-charset-normalizer>=3.0.0
+# ============================================================
+# 通用格式转换器 (UniversalConverter) v1.0.0
+# Python 依赖清单
+# ============================================================
+# 安装：pip install -r requirements.txt
+#
+# 说明：本应用采用多级引擎降级设计，除 PySide6 为必需外，
+#       其余依赖按模块功能按需安装，缺失不会导致崩溃。
+#
+# 外部工具（非 Python 包，需单独安装）：
+#   - FFmpeg / FFprobe    音视频转换核心引擎（必需，音视频模块）
+#   - pandoc              文档转换主力引擎（推荐，文档模块，~30MB）
+#   - wkhtmltopdf         HTML→PDF 专用（可选，与 weasyprint 二选一）
+# ============================================================
+
+
+# ─── 核心依赖（必需，无此项应用无法启动） ───────────────────
+PySide6>=6.5,<7                 # Qt6 GUI 框架
+
+
+# ─── 图片转换模块（推荐安装，缺失时降级到 FFmpeg） ──────────
+pillow>=10.0                     # 图片转换主引擎 (PNG/JPEG/WebP/BMP/GIF/TIFF/ICO)
+pillow-heif>=0.10                # HEIC/HEIF 图片输入支持
+pillow-avif-plugin>=0.3          # AVIF 图片输出支持
+
+
+# ─── 音频辅助（可选，不影响 FFmpeg 直接调用） ───────────────
+pydub>=0.25                      # FFmpeg Python 封装，utils.py try-import
+
+
+# ─── 文档转换模块（按格式组合按需安装） ─────────────────────
+# 缺失时降级到 pandoc
+
+# PDF 处理
+PyMuPDF>=1.23                    # PDF→图片/TXT（优先，性能最佳）
+pypdf>=4.0                       # PDF→TXT（PyMuPDF 不可用时的兜底）
+
+# Office 文档
+python-docx>=1.0                 # DOCX→TXT（docx2txt 不可用时的兜底）
+docx2txt>=0.8                    # DOCX→TXT（优先）
+openpyxl>=3.1                    # CSV↔XLSX
+
+# 文本标记语言
+markdown>=3.5                    # MD→HTML
+striprtf>=0.0.26                 # RTF→TXT
+
+
+# ─── 轻量文档引擎 ────────────────────────────────────────────
+# pandoc 外部二进制（~30MB，通用文档互转主力）
+# 安装：apt install pandoc / brew install pandoc / 官方下载
+pypandoc>=1.13                    # pandoc 的 Python 封装（可自动下载二进制）
+
+# PPTX 处理
+python-pptx>=0.6                  # PPTX 读取/生成
+
+# PDF → DOCX
+pdf2docx>=0.5                     # 基于 PyMuPDF + python-docx
+
+# HTML → PDF（二选一）
+weasyprint>=60                    # 纯 Python，需 pango/cairo 系统依赖
+# 或外部二进制 wkhtmltopdf（无系统依赖，推荐）：
+#   apt install wkhtmltopdf / brew install --cask wkhtmltopdf
+
+
+# ─── 打包工具（仅发布时需要） ───────────────────────────────
+# pyinstaller>=6.0               # 打包为可执行文件

@@ -13,7 +13,7 @@ from collections import deque
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QLineEdit, QCheckBox, QListWidget, QListWidgetItem, QProgressBar,
+    QLineEdit, QCheckBox, QListWidget, QListWidgetItem,
     QTextEdit, QGroupBox, QSplitter, QMessageBox, QMenu, QFileDialog,
     QSizePolicy, QSlider, QSpinBox, QApplication
 )
@@ -273,7 +273,6 @@ class ImageConversionWorker(QThread):
     progress_signal = Signal(int, int)
     task_started_signal = Signal(str)
     task_finished_signal = Signal(object)
-    log_signal = Signal(str)
     all_done_signal = Signal()
     single_progress_signal = Signal(int)
 
@@ -498,17 +497,12 @@ class ImageConversionWorker(QThread):
 
     def run(self):
         total = len(self.tasks)
-        self.log_signal.emit(f"==== 开始图片转换 (共 {total} 个任务) ====")
         ok = 0
         fail = 0
         for idx, task in enumerate(self.tasks, start=1):
             if not self._is_running:
-                self.log_signal.emit("⛔ 用户已取消转换")
                 break
             self.task_started_signal.emit(os.path.basename(task.input_path))
-            self.log_signal.emit(
-                f"[{idx}/{total}] 转换中: {os.path.basename(task.input_path)} → .{task.output_format}"
-            )
             self.single_progress_signal.emit(5)
             QThread.msleep(10)
             self.single_progress_signal.emit(35)
@@ -519,14 +513,9 @@ class ImageConversionWorker(QThread):
                 res = self._convert_single_pil_local(task)
                 used_engines.append("pillow_local")
             if (res is None or not res.success) and self._is_running and self.system_pil_python:
-                if res and not res.success:
-                    self.log_signal.emit(f"  ⚠ Pillow(本地) 失败，尝试系统 Pillow: {res.message.splitlines()[0]}")
                 res = self._convert_single_pil_subprocess(task)
                 used_engines.append("pillow_system")
             if (res is None or not res.success) and self._is_running:
-                if res and not res.success:
-                    msg_line = res.message.splitlines()[0]
-                    self.log_signal.emit(f"  ⚠ Pillow 全部失败，尝试 FFmpeg 兜底: {msg_line}")
                 res = self._convert_single_ffmpeg(task)
                 used_engines.append("ffmpeg")
 
@@ -534,15 +523,10 @@ class ImageConversionWorker(QThread):
             self.task_finished_signal.emit(res)
             if res is not None and res.success:
                 ok += 1
-                self.log_signal.emit(f"  ✔ {res.message}")
             else:
                 fail += 1
-                suffix = "" if len(used_engines) <= 1 else f" (已尝试 {len(used_engines)} 种引擎: {', '.join(used_engines)})"
-                msg = (res.message if res else "未知错误") + suffix
-                self.log_signal.emit(f"  ✗ {msg}")
             self.progress_signal.emit(idx, total)
 
-        self.log_signal.emit(f"==== 转换结束: 成功 {ok} / 失败 {fail} / 共 {total} ====")
         self.all_done_signal.emit()
 
     def cancel(self):
@@ -551,7 +535,6 @@ class ImageConversionWorker(QThread):
 
 class PipInstallWorker(QThread):
     finished_signal = Signal(bool, str)
-    log_signal = Signal(str)
 
     def __init__(self, pip_target=None, packages=None):
         super().__init__()
@@ -565,8 +548,6 @@ class PipInstallWorker(QThread):
 
     def run(self):
         try:
-            self.log_signal.emit(f"[pip] 目标解释器: {self.pip_target}")
-            self.log_signal.emit(f"[pip] 即将安装: {', '.join(self.packages)}")
             cmd = [
                 self.pip_target, "-m", "pip", "install", "--upgrade",
                 *self.packages
@@ -575,21 +556,18 @@ class PipInstallWorker(QThread):
                 cmd, capture_output=True, text=True, timeout=300,
                 encoding="utf-8", errors="replace"
             )
-            for line in result.stdout.splitlines()[-8:]:
-                if line.strip():
-                    self.log_signal.emit(f"[pip] {line}")
             if result.returncode != 0:
                 tail = "\n".join(result.stderr.splitlines()[-12:])
-                self.log_signal.emit(f"[pip] 安装失败 stderr: {tail}")
                 self.finished_signal.emit(False, f"pip install 失败 (exit={result.returncode}): {tail}")
                 return
-            self.log_signal.emit("[pip] 安装成功！Pillow 及增强插件已就绪，下次启动自动使用。")
             self.finished_signal.emit(True, "Pillow 安装成功！下次启动会自动作为主引擎使用。")
         except Exception as e:
             self.finished_signal.emit(False, f"pip 安装异常: {e}")
 
 
 class ImageConverterWidget(QWidget):
+    task_monitor_signal = Signal(str)
+
     def __init__(self, ffmpeg_mgr, default_output_dir: str = ""):
         super().__init__()
         self.ffmpeg_mgr = ffmpeg_mgr
@@ -614,7 +592,6 @@ class ImageConverterWidget(QWidget):
             ThemeManager.instance().theme_changed.connect(self.reapply_theme)
         except Exception:
             pass
-        QTimer.singleShot(150, self._announce_engine_status)
 
     def _setup_ui(self):
         self.setMinimumWidth(700)
@@ -635,16 +612,12 @@ class ImageConverterWidget(QWidget):
         title_layout.setSpacing(4)
         layout.addLayout(title_layout)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        layout.addWidget(splitter, 1)
-
         top_widget = QWidget()
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(16)
 
         file_group = QGroupBox("待转换图片")
-        file_group.setMinimumHeight(320)
         file_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
@@ -671,7 +644,6 @@ class ImageConverterWidget(QWidget):
         self.file_list.dropEvent = self._drop
         self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self._show_file_context_menu)
-        self.file_list.setMinimumHeight(280)
         self.file_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: {COLORS['bg']};
@@ -722,7 +694,6 @@ class ImageConverterWidget(QWidget):
         top_layout.addWidget(file_group, 3)
 
         settings_group = QGroupBox("转换设置")
-        settings_group.setMinimumHeight(460)
         settings_group.setMinimumWidth(560)
         settings_group.setStyleSheet(f"""
             QGroupBox {{
@@ -923,124 +894,7 @@ class ImageConverterWidget(QWidget):
 
         settings_layout.addStretch(1)
         top_layout.addWidget(settings_group, 2)
-        splitter.addWidget(top_widget)
-
-        bottom_widget = QWidget()
-        bottom_layout = QVBoxLayout(bottom_widget)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(12)
-
-        progress_group = QGroupBox("转换进度")
-        progress_group.setStyleSheet(f"""
-            QGroupBox {{
-                font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 16px;
-                background-color: {COLORS['card']};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }}
-        """)
-        pg_layout = QVBoxLayout(progress_group)
-        pg_layout.setContentsMargins(12, 16, 12, 12)
-        pg_layout.setSpacing(10)
-
-        self.overall_progress_label = QLabel("总进度：0 / 0")
-        self.overall_progress_label.setStyleSheet(f"color: {COLORS['text']}; font-size: 13px;")
-        self.overall_progress = QProgressBar()
-        self.overall_progress.setRange(0, 100)
-        self.overall_progress.setValue(0)
-        self.overall_progress.setTextVisible(True)
-        self.overall_progress.setFormat("%p%")
-        self.overall_progress.setStyleSheet(f"""
-            QProgressBar {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 5px;
-                text-align: center;
-                color: white;
-                height: 22px;
-                font-weight: bold;
-            }}
-            QProgressBar::chunk {{
-                background-color: {COLORS['primary']};
-                border-radius: 5px;
-            }}
-        """)
-
-        self.single_progress_label = QLabel("单张进度：等待开始")
-        self.single_progress_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 12px;")
-        self.single_progress = QProgressBar()
-        self.single_progress.setRange(0, 100)
-        self.single_progress.setValue(0)
-        self.single_progress.setTextVisible(True)
-        self.single_progress.setFormat("%p%")
-        self.single_progress.setStyleSheet(f"""
-            QProgressBar {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 5px;
-                text-align: center;
-                color: white;
-                height: 18px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {COLORS['success']};
-                border-radius: 5px;
-            }}
-        """)
-
-        pg_layout.addWidget(self.overall_progress_label)
-        pg_layout.addWidget(self.overall_progress)
-        pg_layout.addWidget(self.single_progress_label)
-        pg_layout.addWidget(self.single_progress)
-        bottom_layout.addWidget(progress_group)
-
-        log_group = QGroupBox("运行日志")
-        log_group.setStyleSheet(f"""
-            QGroupBox {{
-                font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 16px;
-                background-color: {COLORS['card']};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }}
-        """)
-        log_layout = QVBoxLayout(log_group)
-        log_layout.setContentsMargins(12, 16, 12, 12)
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(150)
-        self.log_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
-                padding: 8px;
-                font-family: Consolas, monospace;
-                font-size: 12px;
-            }}
-        """)
-        log_layout.addWidget(self.log_text)
-        bottom_layout.addWidget(log_group, 1)
-
-        splitter.addWidget(bottom_widget)
-        splitter.setSizes([680, 300])
-        splitter.setChildrenCollapsible(False)
+        layout.addWidget(top_widget, 1)
 
         action_layout = QHBoxLayout()
         action_layout.setSpacing(12)
@@ -1272,7 +1126,6 @@ class ImageConverterWidget(QWidget):
             return False
         if clicked is btn_anyway:
             if self.ffmpeg_mgr and self.ffmpeg_mgr.available:
-                self._log("继续（仅 FFmpeg 兜底，部分格式/质量受限）", level="warning")
                 return True
             QMessageBox.warning(self, "无法继续", "FFmpeg 也不可用，请先安装 Pillow 或配置 FFmpeg。")
             return False
@@ -1283,61 +1136,20 @@ class ImageConverterWidget(QWidget):
             QMessageBox.information(self, "提示", "Pillow 安装正在进行中，请稍候…")
             return
         self.install_worker = PipInstallWorker()
-        self.install_worker.log_signal.connect(
-            lambda m: self._log(m, level="warning")
-        )
         self.install_worker.finished_signal.connect(self._on_pillow_installed)
-        self._log(f"开始在当前环境安装 Pillow: {self.install_worker.pip_target}", level="warning")
         self.convert_btn.setEnabled(False)
         self.install_worker.start()
 
     def _on_pillow_installed(self, success: bool, msg: str):
         if success:
-            self._log(msg, level="success")
             QMessageBox.information(self, "安装成功", msg + "\n\n重启程序后，Pillow 会自动作为主引擎使用。")
         else:
-            self._log(msg, level="error")
             QMessageBox.critical(
                 self, "安装失败",
                 msg + "\n\n请手动执行：\n"
                 + (self.install_worker.pip_target if hasattr(self, 'install_worker') and self.install_worker else "python3") + " -m pip install --upgrade pillow pillow-heif pillow-avif-plugin"
             )
         self.convert_btn.setEnabled(not (self.worker and self.worker.isRunning()))
-
-    def _announce_engine_status(self):
-        engines = []
-        if self.pil_local_available:
-            engines.append("✅ Pillow(本地)")
-        if self.system_pil_python:
-            engines.append(f"✅ Pillow(外部:{os.path.basename(self.system_pil_python)})")
-        if self.ffmpeg_mgr and self.ffmpeg_mgr.available:
-            engines.append("✅ FFmpeg 兜底")
-        if engines:
-            self._log(
-                "图片引擎就绪 = " + " / ".join(engines)
-                + "。Pillow 为首选，FFmpeg 仅在两级 Pillow 都不可用时自动兜底。"
-            )
-        else:
-            self._log(
-                "⚠ 当前三种引擎均不可用。建议点击开始转换时选择「一键安装 Pillow」。",
-                level="warning"
-            )
-
-    def ffmpeg_status_changed(self, available, log=None):
-        if log:
-            self._log(log)
-        if available:
-            mgr = self.ffmpeg_mgr
-            if mgr:
-                src = getattr(mgr, "source_label", "") or ""
-                extra = f"{src} · " if src else ""
-                muxers = len(getattr(mgr, "supported_muxers", []) or [])
-                encoders = len(getattr(mgr, "supported_encoders", []) or [])
-                self._log(
-                    f"FFmpeg 就绪（{extra}{muxers}mux/{encoders}enc）"
-                    "，Pillow 主引擎优先，FFmpeg 仅兜底。",
-                    level="success"
-                )
 
     def _start_conversion(self):
         if not self._ensure_engine_ready():
@@ -1351,85 +1163,37 @@ class ImageConverterWidget(QWidget):
         if self.worker and self.worker.isRunning():
             return
 
-        if not self.pil_local_available and self.system_pil_python:
-            self._log(
-                f"当前 pygeshi 环境未安装 Pillow → 自动切换为「系统 Python·Pillow」"
-                f"({self.system_pil_python})，也可一键安装到当前环境避免子进程开销。",
-                level="warning"
-            )
-
         self.convert_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.overall_progress.setValue(0)
-        self.single_progress.setValue(0)
-        self.overall_progress_label.setText(f"总进度：0 / {len(tasks)}")
 
         self.worker = ImageConversionWorker(
             tasks, self.ffmpeg_mgr,
             system_pil_python=self.system_pil_python
         )
         self.worker.progress_signal.connect(self._on_overall_progress)
-        self.worker.single_progress_signal.connect(self._on_single_progress)
         self.worker.task_started_signal.connect(self._on_task_started)
         self.worker.task_finished_signal.connect(self._on_task_finished)
-        self.worker.log_signal.connect(self._log)
         self.worker.all_done_signal.connect(self._on_all_done)
         self.worker.start()
 
     def _stop_conversion(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
-            self._log("⏹  收到停止请求，将在下一个任务前退出…")
             self.stop_btn.setEnabled(False)
 
     def _on_overall_progress(self, current, total):
-        pct = int(current / max(1, total) * 100)
-        self.overall_progress.setValue(pct)
-        self.overall_progress_label.setText(f"总进度：{current} / {total}  ({pct}%)")
-
-    def _on_single_progress(self, value):
-        self.single_progress.setValue(value)
+        pass
 
     def _on_task_started(self, name):
-        self.single_progress_label.setText(f"单张进度：{name} 处理中…")
-        self.single_progress.setValue(0)
+        self.task_monitor_signal.emit(name)
 
     def _on_task_finished(self, result: ImageConversionResult):
-        c = self.theme_colors
-        if result.success:
-            self.single_progress_label.setText(f"单张进度：✔ {os.path.basename(result.task.output_path)} 完成")
-            color = c["success"]
-        else:
-            self.single_progress_label.setText(f"单张进度：✗ {os.path.basename(result.task.output_path)} 失败")
-            color = c["error"]
-        self._log(
-            f"{'[成功]' if result.success else '[失败]'}  "
-            f"{os.path.basename(result.task.input_path)}  →  "
-            f"{os.path.basename(result.task.output_path)}  |  {result.message}",
-            level="success" if result.success else "error"
-        )
-        # 防止旧代码的 color 丢失：
-        _ = color
+        pass
 
     def _on_all_done(self):
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-
-    def _log(self, message: str, level: str = "info"):
-        c = self.theme_colors
-        now = time.strftime("%H:%M:%S")
-        color_map = {
-            "info": c.get("log_text", "#d4d4d4"),
-            "success": c["success"],
-            "warning": c["warning"],
-            "error": c["error"],
-        }
-        color = color_map.get(level, color_map["info"])
-        self.log_text.append(
-            f'<span style="color:#888;">[{now}]</span> <span style="color:{color};">{message}</span>'
-        )
-        sb = self.log_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        self.task_monitor_signal.emit("")
 
     # ==================== 主题 / 默认输出目录支持 ====================
 
@@ -1625,46 +1389,6 @@ class ImageConverterWidget(QWidget):
             color: {c['text']};
             font-weight: 600;
         }}
-        """)
-
-        # --- 进度条 ---
-        progress_bar_style = f"""
-            QProgressBar {{
-                border: 1px solid {c['border']};
-                border-radius: 4px;
-                text-align: center;
-                background-color: {c['bg']};
-                color: {c['text']};
-                height: 22px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {c['primary']};
-                border-radius: 3px;
-            }}
-        """
-        self.overall_progress.setStyleSheet(progress_bar_style)
-        self.single_progress.setStyleSheet(progress_bar_style)
-
-        self.overall_progress_label.setStyleSheet(
-            f"color: {c['text']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-        self.single_progress_label.setStyleSheet(
-            f"color: {c['success']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-
-        # --- 日志面板 ---
-        log_bg = c.get("log_bg", "#1e1e1e")
-        log_text_color = c.get("log_text", "#d4d4d4")
-        self.log_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {log_bg};
-                color: {log_text_color};
-                border: 1px solid {c['border']};
-                border-radius: 6px;
-                padding: 8px;
-                font-family: Consolas, monospace;
-                font-size: 12px;
-            }}
         """)
 
         # --- 底部三大操作按钮 ---

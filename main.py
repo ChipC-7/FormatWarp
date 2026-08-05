@@ -19,6 +19,7 @@ from video_converter import VideoConverterWidget
 from image_converter import ImageConverterWidget
 from doc_converter import DocConverterWidget
 from settings_widget import SettingsWidget
+from conversion_monitor import ConversionMonitorWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -108,8 +109,8 @@ class MainWindow(QMainWindow):
             ("🎬 视频转换", 1),
             ("🖼️  图片转换", 2),
             ("📄 文档转换", 3),
-            ("⚙️  全局设置", 4),
-            ("🛠️  FFmpeg 路径", 99)
+            ("📊 转换监控", 4),
+            ("⚙️  全局设置", 5),
         ]
         
         for text, index in nav_items:
@@ -137,6 +138,7 @@ class MainWindow(QMainWindow):
         self.video_widget = VideoConverterWidget(self.ffmpeg_mgr, default_output_dir=default_out)
         self.image_widget = ImageConverterWidget(self.ffmpeg_mgr, default_output_dir=default_out)
         self.doc_widget   = DocConverterWidget(default_output_dir=default_out)
+        self.monitor_widget = ConversionMonitorWidget()
         self.settings_widget = SettingsWidget(
             initial_theme=ThemeManager.instance().current_theme,
             initial_output_dir=default_out,
@@ -146,7 +148,8 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(self.video_widget)    # index 1
         self.content_stack.addWidget(self.image_widget)    # index 2
         self.content_stack.addWidget(self.doc_widget)      # index 3
-        self.content_stack.addWidget(self.settings_widget) # index 4
+        self.content_stack.addWidget(self.monitor_widget)  # index 4
+        self.content_stack.addWidget(self.settings_widget) # index 5
         
         
         main_layout.addWidget(self.content_stack, 1)
@@ -164,22 +167,7 @@ class MainWindow(QMainWindow):
             return
             
         target_index = current_item.data(Qt.ItemDataRole.UserRole)
-        
-        if target_index == 99:
-            last_stack_index = self.content_stack.currentIndex()
-            last_nav_row = 0
-            for row in range(self.nav_list.count()):
-                it = self.nav_list.item(row)
-                if (it.data(Qt.ItemDataRole.UserRole) or 0) == last_stack_index:
-                    last_nav_row = row
-                    break
-            self._show_settings_dialog()
-            self.nav_list.blockSignals(True)
-            self.nav_list.setCurrentRow(last_nav_row)
-            self.nav_list.blockSignals(False)
-            self.content_stack.setCurrentIndex(last_stack_index)
-        else:
-            self.content_stack.setCurrentIndex(target_index)
+        self.content_stack.setCurrentIndex(target_index)
 
     def _connect_global_signals(self):
         tm = ThemeManager.instance()
@@ -189,6 +177,7 @@ class MainWindow(QMainWindow):
         tm.theme_changed.connect(self.video_widget.reapply_theme)
         tm.theme_changed.connect(self.image_widget.reapply_theme)
         tm.theme_changed.connect(self.doc_widget.reapply_theme)
+        tm.theme_changed.connect(self.monitor_widget.reapply_theme)
         tm.theme_changed.connect(self.settings_widget.reapply_theme)
         # 默认输出目录变化 -> 四个转换模块同步更新
         self.settings_widget.default_output_dir_changed.connect(
@@ -203,6 +192,19 @@ class MainWindow(QMainWindow):
         self.settings_widget.default_output_dir_changed.connect(
             self.doc_widget.set_default_output_dir
         )
+        # 转换任务信号 -> 监视器
+        self.audio_widget.task_monitor_signal.connect(
+            lambda name: self.monitor_widget.clear_module("🎵 音频") if not name else self.monitor_widget.add_task("🎵 音频", name)
+        )
+        self.video_widget.task_monitor_signal.connect(
+            lambda name: self.monitor_widget.clear_module("🎬 视频") if not name else self.monitor_widget.add_task("🎬 视频", name)
+        )
+        self.image_widget.task_monitor_signal.connect(
+            lambda name: self.monitor_widget.clear_module("🖼️ 图片") if not name else self.monitor_widget.add_task("🖼️ 图片", name)
+        )
+        self.doc_widget.task_monitor_signal.connect(
+            lambda name: self.monitor_widget.clear_module("📄 文档") if not name else self.monitor_widget.add_task("📄 文档", name)
+        )
 
     def _check_ffmpeg(self):
         custom_path = self.settings.value("MainWindow/custom_ffmpeg", "")
@@ -212,49 +214,12 @@ class MainWindow(QMainWindow):
             self._ffmpeg_failed()
 
     def _ffmpeg_success(self):
-        mux_n = len(getattr(self.ffmpeg_mgr, 'supported_muxers', set()))
-        enc_n = len(getattr(self.ffmpeg_mgr, 'supported_encoders', set()))
         self.status_bar.showMessage(
             f"✓ FFmpeg 已就绪 [{self.ffmpeg_mgr.source}]  |  {self.ffmpeg_mgr.ffmpeg_path}", 5000
-        )
-        msg = f"FFmpeg 检测成功 (来源: {self.ffmpeg_mgr.source}, muxers={mux_n}, encoders={enc_n})"
-        self.audio_widget._log(msg)
-        self.video_widget._log(msg)
-        self.image_widget._log(msg)
-        try:
-            if hasattr(self.image_widget, 'ffmpeg_status_changed'):
-                self.image_widget.ffmpeg_status_changed(True, None)
-        except Exception:
-            pass
-        self.image_widget._log(
-            "图片转换主引擎优先级：Pillow(本地) → Pillow(系统) → FFmpeg 兜底。"
-            "若 Pillow 两级都缺失，点击开始转换会提示一键安装。", level="success"
         )
 
     def _ffmpeg_failed(self):
         self.status_bar.showMessage("✗ FFmpeg 未检测到 — 音视频暂不可用（图片转换仍可使用 Pillow 或一键安装）", 0)
-        self.audio_widget._log("FFmpeg 未检测到，音频转换功能暂不可用。", level="warning")
-        self.video_widget._log("FFmpeg 未检测到，视频转换功能暂不可用。", level="warning")
-        try:
-            if hasattr(self.image_widget, 'ffmpeg_status_changed'):
-                self.image_widget.ffmpeg_status_changed(False, None)
-        except Exception:
-            pass
-        try:
-            from PIL import Image
-            pil_ok = True
-        except Exception:
-            pil_ok = False
-        if pil_ok:
-            self.image_widget._log(
-                "FFmpeg 未检测到，但 Pillow 可用 — 图片转换功能正常。", level="success"
-            )
-        else:
-            self.image_widget._log(
-                "FFmpeg 未检测到且 Pillow 未安装：点击开始转换会提示「一键安装 Pillow」，或手动："
-                f"{shutil.which('python3') or shutil.which('python') or 'python3'} -m pip install --upgrade pillow pillow-heif pillow-avif-plugin",
-                level="warning"
-            )
 
     def _show_settings_dialog(self):
         dialog = QMessageBox(self)
@@ -321,11 +286,6 @@ class MainWindow(QMainWindow):
             if self.ffmpeg_mgr.detect_custom(path):
                 self.settings.setValue("MainWindow/custom_ffmpeg", path)
                 self.status_bar.showMessage(f"✓ FFmpeg 已手动指定  |  {path}", 5000)
-                self.audio_widget._log(
-                    f"FFmpeg 路径已手动设置为: {path}  "
-                    f"(muxers={len(self.ffmpeg_mgr.supported_muxers)}, "
-                    f"encoders={len(self.ffmpeg_mgr.supported_encoders)})"
-                )
                 QMessageBox.information(self, "FFmpeg 设置成功",
                     f"已选择：\n\n"
                     f"路径: {path}\n"

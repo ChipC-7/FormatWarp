@@ -49,9 +49,7 @@ COLORS_DARK = {
     "error": "#e94560",
     "error_hover": "#ff4d4f",
 
-    # 日志 / 禁用按钮硬编码颜色
-    "log_bg": "#0d1117",
-    "log_text": "#c9d1d9",
+    # 禁用按钮硬编码颜色
     "btn_disabled_bg": "#2a2a3e",
     "btn_disabled_text": "#666666",
     "btn_disabled_border": "#333333",
@@ -85,9 +83,7 @@ COLORS_LIGHT = {
     "error": "#d9405d",
     "error_hover": "#ff5a78",
 
-    # 日志 / 禁用按钮硬编码颜色（亮色下日志面板保持深色，对比度更清晰；禁用按钮变浅灰）
-    "log_bg": "#1a2440",
-    "log_text": "#eaf0fb",
+    # 禁用按钮硬编码颜色（亮色下禁用按钮变浅灰）
     "btn_disabled_bg": "#d6ddef",
     "btn_disabled_text": "#8a96b5",
     "btn_disabled_border": "#b4c2e0",
@@ -484,7 +480,6 @@ class BaseConversionWorker(QThread):
     progress_signal = Signal(int, int)
     task_started_signal = Signal(str)
     task_finished_signal = Signal(object)
-    log_signal = Signal(str)
     all_done_signal = Signal()
     single_progress_signal = Signal(int)
 
@@ -550,10 +545,6 @@ class BaseConversionWorker(QThread):
             self.task_started_signal.emit(os.path.basename(task.input_path))
             result = self._convert_single(task)
             self.task_finished_signal.emit(result)
-            status = "✓" if result.success else "✗"
-            self.log_signal.emit(
-                f"{status} {os.path.basename(task.input_path)}: {result.message}"
-            )
         self.all_done_signal.emit()
 
     def _convert_single(self, task):
@@ -681,11 +672,11 @@ def get_main_stylesheet(colors: Optional[dict] = None) -> str:
             border-radius: 5px;
         }}
         QTextEdit {{
-            background-color: {c["log_bg"]};
+            background-color: {c["bg"]};
             border: 1px solid {c["border"]};
             border-radius: 8px;
             padding: 12px;
-            color: {c["log_text"]};
+            color: {c["text"]};
             font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
             font-size: 12px;
         }}

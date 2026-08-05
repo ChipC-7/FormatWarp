@@ -6,10 +6,10 @@ import re
 from collections import deque
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QLineEdit, QCheckBox, QListWidget, QListWidgetItem, QProgressBar,
+    QLineEdit, QCheckBox, QListWidget, QListWidgetItem,
     QTextEdit, QGroupBox, QSplitter, QMessageBox, QMenu, QFileDialog, QSizePolicy
 )
-from PySide6.QtCore import Qt, Slot, QStandardPaths, QTime, QRectF, QSize
+from PySide6.QtCore import Qt, Signal, Slot, QStandardPaths, QTime, QRectF, QSize
 from PySide6.QtGui import (
     QDragEnterEvent, QDropEvent, QPixmap, QPainter, QColor, QPen, QBrush,
     QPainterPath, QIcon
@@ -214,6 +214,7 @@ class AudioConversionWorker(BaseConversionWorker):
             )
 
 class AudioConverterWidget(QWidget):
+    task_monitor_signal = Signal(str)
     def __init__(self, ffmpeg_mgr, default_output_dir: str = ""):
         super().__init__()
         self.ffmpeg_mgr = ffmpeg_mgr
@@ -250,19 +251,15 @@ class AudioConverterWidget(QWidget):
         title_layout.setSpacing(4)
         layout.addLayout(title_layout)
 
-        # === 分割器 ===
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        layout.addWidget(splitter, 1)
-
-        # --- 上半部分 ---
+        # === 主内容区（左右面板） ===
         top_widget = QWidget()
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(16)
+        layout.addWidget(top_widget, 1)
 
         # 文件列表
         file_group = QGroupBox("待转换文件")
-        file_group.setMinimumHeight(320)
         file_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
@@ -289,7 +286,6 @@ class AudioConverterWidget(QWidget):
         self.file_list.dropEvent = self._drop
         self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self._show_file_context_menu)
-        self.file_list.setMinimumHeight(280)
         self.file_list.setStyleSheet(f"""
             QListWidget {{
                 background-color: {COLORS['bg']};
@@ -343,7 +339,6 @@ class AudioConverterWidget(QWidget):
 
         # 转换设置 (核心修复区)
         settings_group = QGroupBox("转换设置")
-        settings_group.setMinimumHeight(400)
         settings_group.setMinimumWidth(420)  # 防止布局崩溃的底线
         settings_group.setStyleSheet(f"""
             QGroupBox {{
@@ -554,125 +549,6 @@ class AudioConverterWidget(QWidget):
         
         settings_layout.addStretch()
         top_layout.addWidget(settings_group, 2)
-        splitter.addWidget(top_widget)
-
-        # --- 下半部分 ---
-        bottom_widget = QWidget()
-        bottom_layout = QVBoxLayout(bottom_widget)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(12)
-
-        # 进度（总进度 + 单个任务进度，双进度条）
-        progress_group = QGroupBox("转换进度")
-        progress_group.setStyleSheet(f"""
-            QGroupBox {{
-                font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 16px;
-                background-color: {COLORS['card']};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }}
-        """)
-        progress_layout = QVBoxLayout(progress_group)
-        progress_layout.setContentsMargins(12, 16, 12, 12)
-        progress_layout.setSpacing(8)
-
-        progress_bar_style = f"""
-            QProgressBar {{
-                border: 1px solid {COLORS['border']};
-                border-radius: 4px;
-                text-align: center;
-                background-color: {COLORS['bg']};
-                color: {COLORS['text']};
-                height: 22px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {COLORS['primary']};
-                border-radius: 3px;
-            }}
-        """
-
-        # --- 总进度 ---
-        self.overall_progress_label = QLabel("总进度：0 / 0")
-        self.overall_progress_label.setStyleSheet(
-            f"color: {COLORS['text']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-
-        self.overall_progress_bar = QProgressBar()
-        self.overall_progress_bar.setRange(0, 100)
-        self.overall_progress_bar.setValue(0)
-        self.overall_progress_bar.setTextVisible(True)
-        self.overall_progress_bar.setFormat("0%  (0 / 0)")
-        self.overall_progress_bar.setStyleSheet(progress_bar_style)
-
-        # --- 单个任务进度 ---
-        self.single_progress_label = QLabel("单任务进度：等待开始")
-        self.single_progress_label.setStyleSheet(
-            f"color: {COLORS['success']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-
-        self.single_progress_bar = QProgressBar()
-        self.single_progress_bar.setRange(0, 100)
-        self.single_progress_bar.setValue(0)
-        self.single_progress_bar.setTextVisible(True)
-        self.single_progress_bar.setFormat("0%")
-        self.single_progress_bar.setStyleSheet(progress_bar_style)
-
-        progress_layout.addWidget(self.overall_progress_label)
-        progress_layout.addWidget(self.overall_progress_bar)
-        progress_layout.addSpacing(4)
-        progress_layout.addWidget(self.single_progress_label)
-        progress_layout.addWidget(self.single_progress_bar)
-
-        bottom_layout.addWidget(progress_group)
-
-        # 日志
-        log_group = QGroupBox("运行日志")
-        log_group.setStyleSheet(f"""
-            QGroupBox {{
-                font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 16px;
-                background-color: {COLORS['card']};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }}
-        """)
-        log_layout = QVBoxLayout(log_group)
-        log_layout.setContentsMargins(12, 16, 12, 12)
-
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(150)
-        self.log_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: #1e1e1e;
-                color: #d4d4d4;
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
-                padding: 8px;
-                font-family: Consolas, monospace;
-                font-size: 12px;
-            }}
-        """)
-
-        log_layout.addWidget(self.log_text)
-        bottom_layout.addWidget(log_group, 1)
-        splitter.addWidget(bottom_widget)
-        splitter.setSizes([520, 360])
 
         # === 底部操作栏 ===
         action_layout = QHBoxLayout()
@@ -861,19 +737,6 @@ class AudioConverterWidget(QWidget):
 
         tasks = self._build_tasks()
         total = len(tasks)
-        self._log(f"开始转换 {total} 个文件...")
-
-        self.overall_progress_bar.setRange(0, total)
-        self.overall_progress_bar.setValue(0)
-        self.overall_progress_bar.setFormat(f"0%  (0 / {total})")
-        self.overall_progress_label.setText(f"总进度：0 / {total}")
-
-        self.single_progress_bar.setRange(0, 100)
-        self.single_progress_bar.setValue(0)
-        self.single_progress_bar.setFormat("0%")
-        self.single_progress_label.setText("单任务进度：等待开始...")
-
-        self.log_text.clear()
 
         self.convert_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -884,83 +747,29 @@ class AudioConverterWidget(QWidget):
             self.ffmpeg_mgr.supported_muxers
         )
         self.worker.progress_signal.connect(self._on_progress)
-        self.worker.single_progress_signal.connect(self._on_single_progress)
+        
         self.worker.task_started_signal.connect(self._on_task_started)
-        self.worker.task_finished_signal.connect(self._on_task_finished)
-        self.worker.log_signal.connect(self._on_worker_log)
         self.worker.all_done_signal.connect(self._on_all_done)
         self.worker.start()
 
     def _stop_conversion(self):
         if self.worker:
             self.worker.stop()
-            self._log("用户取消了转换", level="warning")
 
     @Slot(int, int)
     def _on_progress(self, current: int, total: int):
-        self.overall_progress_bar.setRange(0, total)
-        self.overall_progress_bar.setValue(current)
-        overall_percent = int(current * 100 / total) if total else 0
-        self.overall_progress_bar.setFormat(f"{overall_percent}%  ({current} / {total})")
-        self.overall_progress_label.setText(f"总进度：{current} / {total}")
-
-    @Slot(int)
-    def _on_single_progress(self, percent: int):
-        percent = max(0, min(100, percent))
-        self.single_progress_bar.setValue(percent)
-        self.single_progress_bar.setFormat(f"{percent}%")
+        pass
 
     @Slot(str)
     def _on_task_started(self, filename: str):
-        self.single_progress_bar.setValue(0)
-        self.single_progress_bar.setFormat("0%")
-        self.single_progress_label.setText(f"单任务进度：{filename}")
-
-    @Slot(ConversionResult)
-    def _on_task_finished(self, result: ConversionResult):
-        color = COLORS["success"] if result.success else COLORS["error"]
-        self._log(
-            f"{'[成功]' if result.success else '[失败]'}  "
-            f"{os.path.basename(result.task.input_path)}  →  "
-            f"{os.path.basename(result.task.output_path)}  |  {result.message}",
-            color=color
-        )
-
-    @Slot(str)
-    def _on_worker_log(self, message: str):
-        self._log(message)
+        self.task_monitor_signal.emit(filename)
 
     @Slot()
     def _on_all_done(self):
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        total = self.overall_progress_bar.maximum()
-        if total > 0:
-            self.overall_progress_bar.setValue(total)
-            self.overall_progress_bar.setFormat(f"100%  ({total} / {total})")
-            self.overall_progress_label.setText(f"总进度：{total} / {total}")
-        self.single_progress_bar.setValue(100)
-        self.single_progress_bar.setFormat("100%")
-        self.single_progress_label.setText("✓ 全部转换完成")
-        self._log("=" * 50)
-        self._log("所有任务处理完毕")
+        self.task_monitor_signal.emit("")
         QMessageBox.information(self, "完成", "所有转换任务已处理完毕！")
-
-    def _log(self, message: str, level: str = "info", color: str = None):
-        c = self.theme_colors
-        colors = {
-            "info": c.get("log_text", "#c9d1d9"),
-            "warning": c.get("warning", "#f9a826"),
-            "error": c.get("error", "#e94560"),
-            "success": c.get("success", "#00d9ff")
-        }
-        text_color = color or colors.get(level, colors["info"])
-        timestamp = QTime.currentTime().toString("hh:mm:ss")
-        html = f'<span style="color: #484f58;">[{timestamp}]</span>  '
-        html += f'<span style="color: {text_color};">{message}</span>'
-        self.log_text.append(html)
-        scrollbar = self.log_text.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
 
     # ==================== 主题 / 默认输出目录支持 ====================
 
@@ -1140,7 +949,7 @@ class AudioConverterWidget(QWidget):
         for i in range(self.layout().count()):
             pass  # 无需特殊处理，使用 get_cjk_font_qss 颜色已在 _setup_ui 中设置，但我们需要统一更新：
         # 简化：直接根据 objectName 或 walk 所有内嵌 QLabel 设置 text 颜色 (除标题和日志外)
-        # 此处为避免复杂度，仅更新 normalize_check 与进度条等硬编码样式，其余依赖全局 QSS
+        # 此处为避免复杂度，仅更新 normalize_check 与状态标签等硬编码样式，其余依赖全局 QSS
 
         # --- 音量归一化按钮 ---
         accent_rgba_10 = f"rgba{tuple(int(c['accent'].lstrip('#')[i:i+2], 16) for i in (0, 2, 4)) + (int(255*0.10),)}".replace("(", "(").replace(" ", "")
@@ -1164,46 +973,6 @@ class AudioConverterWidget(QWidget):
             color: {c['text']};
             font-weight: 600;
         }}
-        """)
-
-        # --- 进度条 ---
-        progress_bar_style = f"""
-            QProgressBar {{
-                border: 1px solid {c['border']};
-                border-radius: 4px;
-                text-align: center;
-                background-color: {c['bg']};
-                color: {c['text']};
-                height: 22px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {c['primary']};
-                border-radius: 3px;
-            }}
-        """
-        self.overall_progress_bar.setStyleSheet(progress_bar_style)
-        self.single_progress_bar.setStyleSheet(progress_bar_style)
-
-        self.overall_progress_label.setStyleSheet(
-            f"color: {c['text']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-        self.single_progress_label.setStyleSheet(
-            f"color: {c['success']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-
-        # --- 日志面板 ---
-        log_bg = c.get("log_bg", "#1e1e1e")
-        log_text_color = c.get("log_text", "#d4d4d4")
-        self.log_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {log_bg};
-                color: {log_text_color};
-                border: 1px solid {c['border']};
-                border-radius: 6px;
-                padding: 8px;
-                font-family: Consolas, monospace;
-                font-size: 12px;
-            }}
         """)
 
         # --- 底部三大操作按钮 ---
@@ -1258,14 +1027,3 @@ class AudioConverterWidget(QWidget):
                 border-color: {c["success"]};
             }}
         """)
-
-    @Slot(ConversionResult)
-    def _on_task_finished(self, result: ConversionResult):
-        c = self.theme_colors
-        color = c["success"] if result.success else c["error"]
-        self._log(
-            f"{'[成功]' if result.success else '[失败]'}  "
-            f"{os.path.basename(result.task.input_path)}  →  "
-            f"{os.path.basename(result.task.output_path)}  |  {result.message}",
-            color=color
-        )

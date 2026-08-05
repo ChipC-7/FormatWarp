@@ -5,7 +5,6 @@ import os
 import sys
 import shutil
 import subprocess
-import time
 import tempfile
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
@@ -13,8 +12,8 @@ from collections import deque
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QLineEdit, QListWidget, QListWidgetItem, QProgressBar,
-    QTextEdit, QGroupBox, QSplitter, QMessageBox, QMenu, QFileDialog,
+    QLineEdit, QListWidget, QListWidgetItem,
+    QGroupBox, QMessageBox, QMenu, QFileDialog,
     QSizePolicy, QSpinBox, QApplication
 )
 from PySide6.QtCore import Qt, QThread, Signal, QStandardPaths, QRectF, QSize, QObject, QTimer, Slot
@@ -24,14 +23,14 @@ from PySide6.QtGui import (
 )
 from utils import COLORS, BaseConversionWorker, get_cjk_font_qss, ThemeManager
 
-# ============================================================
+
 # 文档格式定义
 # ============================================================
 SUPPORTED_DOC_FORMATS = {
     "pdf":     {"ext": ".pdf",  "desc": "PDF — 通用电子文档（跨平台首选）"},
     "docx":    {"ext": ".docx", "desc": "DOCX — Microsoft Word 现代格式"},
     "doc":     {"ext": ".doc",  "desc": "DOC — 旧版 Word（建议转 DOCX）"},
-    "odt":     {"ext": ".odt",  "desc": "ODT — LibreOffice/OpenOffice 文本文档"},
+    "odt":     {"ext": ".odt",  "desc": "ODT — 开放文档文本文档"},
     "xlsx":    {"ext": ".xlsx", "desc": "XLSX — Microsoft Excel 现代表格"},
     "xls":     {"ext": ".xls",  "desc": "XLS — 旧版 Excel（建议转 XLSX）"},
     "csv":     {"ext": ".csv",  "desc": "CSV — 逗号分隔值表格"},
@@ -126,25 +125,31 @@ def _is_image_input(path: str) -> bool:
 # ============================================================
 # 引擎探测
 # ============================================================
-def _find_libreoffice() -> Optional[str]:
-    for name in ("libreoffice", "soffice", "openoffice", "libreoffice.exe", "soffice.exe"):
+def _find_pandoc() -> Optional[str]:
+    try:
+        return shutil.which("pandoc")
+    except Exception:
+        return None
+
+
+def _find_wkhtmltopdf() -> Optional[str]:
+    """探测 wkhtmltopdf 二进制（HTML→PDF 专用，体积约 50MB）"""
+    for name in ("wkhtmltopdf", "wkhtmltopdf.exe"):
         try:
             p = shutil.which(name)
             if p:
                 return p
         except Exception:
             pass
-    for hard in ("/usr/bin/libreoffice", "/usr/bin/soffice", "/Applications/LibreOffice.app/Contents/MacOS/soffice"):
+    for hard in (
+        "/usr/bin/wkhtmltopdf",
+        "/usr/local/bin/wkhtmltopdf",
+        "/opt/homebrew/bin/wkhtmltopdf",
+        r"C:\Program Files\wkhtmltopdf\bin\wkhtmltopdf.exe",
+    ):
         if os.path.isfile(hard):
             return hard
     return None
-
-
-def _find_pandoc() -> Optional[str]:
-    try:
-        return shutil.which("pandoc")
-    except Exception:
-        return None
 
 
 def _probe_native_engines() -> dict:
@@ -195,6 +200,27 @@ def _probe_native_engines() -> dict:
         flags["csv"] = True
     except Exception:
         flags["csv"] = False
+    # ── 轻量文档扩展库 ──
+    try:
+        import pptx  # python-pptx
+        flags["python_pptx"] = True
+    except Exception:
+        flags["python_pptx"] = False
+    try:
+        from pdf2docx import parse  # noqa: F401
+        flags["pdf2docx"] = True
+    except Exception:
+        flags["pdf2docx"] = False
+    try:
+        from weasyprint import HTML  # noqa: F401
+        flags["weasyprint"] = True
+    except Exception:
+        flags["weasyprint"] = False
+    try:
+        import pypandoc  # noqa: F401
+        flags["pypandoc"] = True
+    except Exception:
+        flags["pypandoc"] = False
     return flags
 
 
@@ -205,21 +231,20 @@ class DocConversionWorker(QThread):
     progress_signal = Signal(int, int)
     task_started_signal = Signal(str)
     task_finished_signal = Signal(object)
-    log_signal = Signal(str)
     all_done_signal = Signal()
     single_progress_signal = Signal(int)
 
     def __init__(
         self,
         tasks: List[DocConversionTask],
-        libreoffice_path: Optional[str] = None,
         pandoc_path: Optional[str] = None,
+        wkhtmltopdf_path: Optional[str] = None,
         native_flags: Optional[dict] = None,
     ):
         super().__init__()
         self.tasks = tasks
-        self.libreoffice_path = libreoffice_path
-        self.pandoc_path = pandoc_path
+        self.pandoc_path = pandoc_path                # 主力引擎
+        self.wkhtmltopdf_path = wkhtmltopdf_path      # HTML→PDF 专用
         self.native = native_flags or {}
         self._is_running = True
 
@@ -411,114 +436,157 @@ class DocConversionWorker(QThread):
         return False, "当前格式组合无原生引擎，尝试外部工具…"
 
     # ----------------------------------------------------------
-    # 2) LibreOffice headless（最强通用格式互转）
+    # 1.5) pdf2docx — PDF → DOCX（替代 LO 的 PDF→DOCX）
     # ----------------------------------------------------------
-    def _try_libreoffice(self, task: DocConversionTask) -> Tuple[bool, str]:
-        if not self.libreoffice_path:
-            return False, "未检测到 LibreOffice"
-        src, dst, fmt = task.input_path, task.output_path, task.output_format
-        # LibreOffice 按 --convert-to 参数决定输出格式；它会写到目标目录下
-        tmp_dir = tempfile.mkdtemp(prefix="formatshift_lo_")
-        # 单独用户 profile 目录（避免多个 LibreOffice 实例冲突）
-        user_dir = tempfile.mkdtemp(prefix="formatshift_lo_profile_")
-        save_dir = os.path.dirname(os.path.abspath(dst))
+    def _try_pdf2docx(self, task: DocConversionTask) -> Tuple[bool, str]:
+        if not self.native.get("pdf2docx"):
+            return False, "未安装 pdf2docx"
+        src, dst, fmt = task.input_path, task.output_path, task.output_format.lower()
+        src_ext = os.path.splitext(src)[1].lower().lstrip(".")
+        if src_ext != "pdf" or fmt != "docx":
+            return False, "仅支持 PDF → DOCX"
+        save_dir = os.path.dirname(dst)
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
         try:
-            convert_to = fmt.lower()
-            if convert_to == "doc":
-                convert_to = "doc:MS Word 97"
-            elif convert_to == "docx":
-                convert_to = "docx:Office Open XML Text"
-            elif convert_to == "xls":
-                convert_to = "xls:MS Excel 97"
-            elif convert_to == "xlsx":
-                convert_to = "xlsx:Office Open XML Spreadsheet"
-            elif convert_to == "ppt":
-                convert_to = "ppt:MS PowerPoint 97"
-            elif convert_to == "pptx":
-                convert_to = "pptx:Office Open XML Presentation"
-            elif convert_to == "epub":
-                convert_to = "epub:EPUB"
-            elif convert_to == "html":
-                convert_to = "html:HTML (StarWriter)"
-            cmd = [
-                self.libreoffice_path,
-                "--headless",
-                "--nologo",
-                "--nodefault",
-                "--norestore",
-                "--nolockcheck",
-                "-env:UserInstallation=file://" + user_dir,
-                "--convert-to", convert_to,
-                "--outdir", tmp_dir,
-                src,
-            ]
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=180,
-                encoding="utf-8", errors="replace"
-            )
-            # 找输出文件
-            src_base = os.path.splitext(os.path.basename(src))[0]
-            target_ext = SUPPORTED_DOC_FORMATS.get(fmt.lower(), {}).get("ext", f".{fmt}")
-            produced = None
-            for fn in os.listdir(tmp_dir):
-                if fn.lower().endswith(target_ext.lower()) and (
-                    os.path.splitext(fn)[0].lower() == src_base.lower()
-                    or fn.lower().startswith(src_base.lower())
-                ):
-                    produced = os.path.join(tmp_dir, fn)
-                    break
-            if produced is None:
-                # 退一步：任何匹配 target_ext 的结果
-                for fn in os.listdir(tmp_dir):
-                    if fn.lower().endswith(target_ext.lower()):
-                        produced = os.path.join(tmp_dir, fn)
-                        break
-            if result.returncode != 0 or produced is None or not os.path.isfile(produced) or os.path.getsize(produced) == 0:
-                tail = "\n".join(deque(result.stderr.splitlines(), maxlen=8)) or "(无输出)"
-                return False, f"LibreOffice 失败 (exit={result.returncode})\n--- stderr ---\n{tail}"
-            # 重名处理：如果 overwrite=False 且 dst 存在，自动加编号（外部 build 任务时已处理，但再保险一层）
-            final_dst = dst
-            if not task.overwrite:
-                c = 1
-                orig = final_dst
-                while os.path.isfile(final_dst):
-                    final_dst = os.path.splitext(orig)[0] + f"_{c}{target_ext}"
-                    c += 1
-            shutil.move(produced, final_dst)
-            return True, f"LibreOffice → {fmt.upper()}"
+            from pdf2docx import parse
+            parse(src, dst, start=0, end=None, multi_processing=False)
+            if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+                return True, "PDF → DOCX (pdf2docx)"
+            return False, "pdf2docx 输出文件为空"
         except Exception as e:
-            return False, f"LibreOffice 异常: {e}"
-        finally:
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
-            try:
-                shutil.rmtree(user_dir, ignore_errors=True)
-            except Exception:
-                pass
+            return False, f"pdf2docx 失败: {e}"
 
     # ----------------------------------------------------------
-    # 3) Pandoc 兜底（轻量文本标记语言互转）
+    # 1.6) python-pptx — PPTX 提取文本
+    # ----------------------------------------------------------
+    def _try_python_pptx(self, task: DocConversionTask) -> Tuple[bool, str]:
+        if not self.native.get("python_pptx"):
+            return False, "未安装 python-pptx"
+        src, dst, fmt = task.input_path, task.output_path, task.output_format.lower()
+        src_ext = os.path.splitext(src)[1].lower().lstrip(".")
+        if src_ext not in ("pptx", "ppt") or fmt not in ("txt", "pdf"):
+            return False, "仅支持 PPTX → TXT / PDF"
+        save_dir = os.path.dirname(dst)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        try:
+            from pptx import Presentation
+
+            if src_ext == "ppt":
+                # python-pptx 不支持老 .ppt 二进制格式
+                return False, "python-pptx 不支持 .ppt 老格式"
+
+            prs = Presentation(src)
+
+            # ── PPTX → TXT：提取所有幻灯片文本 ──
+            if fmt == "txt":
+                texts = []
+                for i, slide in enumerate(prs.slides, start=1):
+                    texts.append(f"===== Slide {i} =====")
+                    for shape in slide.shapes:
+                        if shape.has_text_frame:
+                            for para in shape.text_frame.paragraphs:
+                                line = "".join(run.text for run in para.runs)
+                                if line:
+                                    texts.append(line)
+                with open(dst, "w", encoding="utf-8") as fo:
+                    fo.write("\n".join(texts))
+                return True, f"PPTX → TXT (python-pptx, {len(prs.slides)} 页)"
+
+            # ── PPTX → PDF：python-pptx 无原生渲染能力 ──
+            if fmt == "pdf":
+                return False, "python-pptx 无原生 PDF 渲染能力，暂不支持 PPTX→PDF"
+        except Exception as e:
+            return False, f"python-pptx 失败: {e}"
+
+    # ----------------------------------------------------------
+    # 1.7) HTML → PDF（weasyprint 或 wkhtmltopdf 二选一）
+    # ----------------------------------------------------------
+    def _try_html_to_pdf(self, task: DocConversionTask) -> Tuple[bool, str]:
+        src, dst, fmt = task.input_path, task.output_path, task.output_format.lower()
+        src_ext = os.path.splitext(src)[1].lower().lstrip(".")
+        if src_ext not in ("html", "htm") or fmt != "pdf":
+            return False, "仅支持 HTML → PDF"
+        save_dir = os.path.dirname(dst)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+
+        # 优先 weasyprint（纯 Python，无外部依赖）
+        if self.native.get("weasyprint"):
+            try:
+                from weasyprint import HTML
+                HTML(filename=src).write_pdf(dst)
+                if os.path.isfile(dst) and os.path.getsize(dst) > 0:
+                    return True, "HTML → PDF (weasyprint)"
+            except Exception:
+                # weasyprint 失败时降级到 wkhtmltopdf
+                pass
+
+        # 次选 wkhtmltopdf（外部二进制，需系统安装）
+        if self.wkhtmltopdf_path:
+            try:
+                cmd = [
+                    self.wkhtmltopdf_path,
+                    "--quiet",
+                    "--encoding", "utf-8",
+                    "--enable-local-file-access",
+                    src, dst,
+                ]
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=120,
+                    encoding="utf-8", errors="replace"
+                )
+                if result.returncode == 0 and os.path.isfile(dst) and os.path.getsize(dst) > 0:
+                    return True, "HTML → PDF (wkhtmltopdf)"
+                tail = "\n".join(deque(result.stderr.splitlines(), maxlen=6)) or "(无输出)"
+                return False, f"wkhtmltopdf 失败 (exit={result.returncode})\n{tail}"
+            except Exception as e:
+                return False, f"wkhtmltopdf 异常: {e}"
+
+        return False, "未检测到 weasyprint 或 wkhtmltopdf"
+
+    # ----------------------------------------------------------
+    # 2) Pandoc 主力引擎（通用文档互转）
     # ----------------------------------------------------------
     def _try_pandoc(self, task: DocConversionTask) -> Tuple[bool, str]:
+        """pandoc 主引擎：处理 MD / HTML / DOCX / ODT / EPUB / RTF / LaTeX 等互转"""
         if not self.pandoc_path:
             return False, "未检测到 pandoc"
         src, dst, fmt = task.input_path, task.output_path, task.output_format.lower()
         src_ext = os.path.splitext(src)[1].lower().lstrip(".")
-        # 仅处理 pandoc 原生擅长的格式组合（避免浪费时间）
-        pandoc_formats = {"md", "markdown", "html", "htm", "docx", "odt", "epub",
-                          "rst", "latex", "tex", "rtf", "txt", "json", "mediawiki"}
-        if src_ext not in pandoc_formats or fmt not in pandoc_formats:
-            return False, "格式不在 pandoc 支持范围"
         save_dir = os.path.dirname(dst)
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
+        # pandoc 支持的输入格式
+        pandoc_inputs = {
+            "md", "markdown", "html", "htm", "docx", "odt", "epub",
+            "rst", "latex", "tex", "rtf", "txt", "json", "mediawiki",
+            "t2t", "org", "wiki",
+        }
+        # pandoc 支持的输出格式
+        pandoc_outputs = {
+            "md", "markdown", "html", "htm", "docx", "odt", "epub",
+            "rst", "latex", "tex", "rtf", "txt", "json", "mediawiki",
+            "pdf",  # 需配合 LaTeX 引擎（如 tectonic / xelatex）
+        }
+        if src_ext not in pandoc_inputs or fmt not in pandoc_outputs:
+            return False, "格式不在 pandoc 支持范围"
         cmd = [self.pandoc_path, src, "-o", dst, "--standalone"]
-        if fmt == "docx" or fmt == "odt" or fmt == "epub":
-            pass  # pandoc 默认支持
+        # ── PDF 输出：pandoc 需要配合 LaTeX 引擎 ──
+        if fmt == "pdf":
+            tectonic = shutil.which("tectonic")
+            if tectonic:
+                cmd.extend(["--pdf-engine=tectonic"])
+            else:
+                xelatex = shutil.which("xelatex")
+                if xelatex:
+                    cmd.extend(["--pdf-engine=xelatex"])
+                else:
+                    return False, "pandoc → PDF 需安装 tectonic 或 xelatex"
+        # ── 中文字体处理（DOCX/HTML/EPUB 输出时） ──
+        if fmt in ("docx", "html", "epub"):
+            cmd.append("--metadata=lang:zh-CN")
         try:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=120,
@@ -536,27 +604,22 @@ class DocConversionWorker(QThread):
     # ----------------------------------------------------------
     def run(self):
         total = len(self.tasks)
-        self.log_signal.emit(f"==== 开始文档转换 (共 {total} 个任务) ====")
         engine_hint = []
         if self.native:
             enabled = [k for k, v in self.native.items() if v]
             if enabled:
                 engine_hint.append("原生Python库: " + ",".join(enabled))
-        if self.libreoffice_path:
-            engine_hint.append(f"LibreOffice: {os.path.basename(self.libreoffice_path)}")
         if self.pandoc_path:
             engine_hint.append(f"pandoc: {os.path.basename(self.pandoc_path)}")
-        if engine_hint:
-            self.log_signal.emit("  引擎链: " + " → ".join(engine_hint))
+        if self.wkhtmltopdf_path:
+            engine_hint.append(f"wkhtmltopdf: {os.path.basename(self.wkhtmltopdf_path)}")
         ok = 0
         fail = 0
         for idx, task in enumerate(self.tasks, start=1):
             if not self._is_running:
-                self.log_signal.emit("⛔ 用户已取消转换")
                 break
             name = os.path.basename(task.input_path)
             self.task_started_signal.emit(name)
-            self.log_signal.emit(f"[{idx}/{total}] 转换中: {name} → .{task.output_format}")
             self.single_progress_signal.emit(5)
             QThread.msleep(10)
             self.single_progress_signal.emit(30)
@@ -568,50 +631,53 @@ class DocConversionWorker(QThread):
             used = []
             res_msg = ""
             success = False
+            last_msg = ""
 
             def _push(label, s, m):
-                nonlocal success, res_msg
+                nonlocal success, res_msg, last_msg
                 used.append(label)
+                last_msg = m
                 if s:
                     success = True
                     res_msg = m
 
-            # 1) 原生 Python 引擎
+            # 1) 原生 Python 引擎（含原有库 + 新增库）
             s, m = self._try_native_python(task)
             _push("原生Python", s, m)
-            self.single_progress_signal.emit(60)
+            self.single_progress_signal.emit(40)
 
-            # 2) LibreOffice（如果未成功且仍在运行）
-            if (not success) and self._is_running:
-                if not success:
-                    self.log_signal.emit(f"  ⚠ 原生引擎未命中，尝试 LibreOffice: {m}")
-                s, m = self._try_libreoffice(task)
-                _push("LibreOffice", s, m)
-                self.single_progress_signal.emit(85)
+            # 2) PDF → DOCX 专用：pdf2docx
+            if not success and self._is_running:
+                s, m = self._try_pdf2docx(task)
+                _push("pdf2docx", s, m)
+            self.single_progress_signal.emit(55)
 
-            # 3) pandoc
-            if (not success) and self._is_running:
-                if used and used[-1] != "原生Python":
-                    self.log_signal.emit(f"  ⚠ LibreOffice 失败，尝试 pandoc: {m.splitlines()[0] if m else ''}")
+            # 3) PPTX 专用：python-pptx
+            if not success and self._is_running:
+                s, m = self._try_python_pptx(task)
+                _push("python-pptx", s, m)
+            self.single_progress_signal.emit(65)
+
+            # 4) pandoc 主力（替换 LO 的通用互转）
+            if not success and self._is_running:
                 s, m = self._try_pandoc(task)
                 _push("pandoc", s, m)
+            self.single_progress_signal.emit(80)
 
+            # 5) HTML → PDF 专用（weasyprint / wkhtmltopdf）
+            if not success and self._is_running:
+                s, m = self._try_html_to_pdf(task)
+                _push("HTML→PDF", s, m)
             self.single_progress_signal.emit(100)
-            result = DocConversionResult(success, task, res_msg if success else (m or "全部引擎失败"))
+
+            result = DocConversionResult(success, task, res_msg if success else (last_msg or "全部引擎失败"))
             self.task_finished_signal.emit(result)
             if success:
                 ok += 1
-                engine_chain = "|".join(used)
-                self.log_signal.emit(f"  ✔ {result.message} (引擎链: {engine_chain})")
             else:
                 fail += 1
-                engine_chain = "|".join(used)
-                self.log_signal.emit(
-                    f"  ✗ 失败 (已尝试 {len(used)} 种引擎: {engine_chain}) — {result.message}"
-                )
             self.progress_signal.emit(idx, total)
 
-        self.log_signal.emit(f"==== 转换结束: 成功 {ok} / 失败 {fail} / 共 {total} ====")
         self.all_done_signal.emit()
 
     def cancel(self):
@@ -622,17 +688,18 @@ class DocConversionWorker(QThread):
 # UI 主 Widget
 # ============================================================
 class DocConverterWidget(QWidget):
+    task_monitor_signal = Signal(str)
+
     def __init__(self, default_output_dir: str = ""):
         super().__init__()
         self.worker = None
-        self.install_worker = None
         self.theme_colors = ThemeManager.instance().current_colors
         self._default_output_dir = (default_output_dir or "").strip()
 
         # 引擎探测
         self.native_flags: dict = _probe_native_engines()
-        self.libreoffice_path: Optional[str] = _find_libreoffice()
         self.pandoc_path: Optional[str] = _find_pandoc()
+        self.wkhtmltopdf_path: Optional[str] = _find_wkhtmltopdf()
 
         self._setup_ui()
         self._apply_widget_styles()
@@ -657,7 +724,7 @@ class DocConverterWidget(QWidget):
 
         title_label = QLabel("📄  文档格式转换")
         title_label.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {COLORS['text']};")
-        subtitle_label = QLabel("支持 PDF / Word / Excel / PPT / Markdown / HTML / EPUB 等批量互转（Python 原生库 + LibreOffice + pandoc 三级引擎）")
+        subtitle_label = QLabel("支持 PDF / Word / Excel / PPT / Markdown / HTML / EPUB 等批量互转（Python原生库 + pandoc + pdf2docx + python-pptx 轻量引擎链）")
         subtitle_label.setStyleSheet(f"font-size: 13px; color: {COLORS['text_secondary']};")
         title_layout = QVBoxLayout()
         title_layout.addWidget(title_label)
@@ -665,13 +732,8 @@ class DocConverterWidget(QWidget):
         title_layout.setSpacing(4)
         layout.addLayout(title_layout)
 
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.setChildrenCollapsible(False)
-        splitter.setSizes([700, 300])
-        layout.addWidget(splitter, 1)
-
-        # 上半：文件列表 + 设置
         top_widget = QWidget()
+        layout.addWidget(top_widget, 1)
         top_layout = QHBoxLayout(top_widget)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(16)
@@ -681,16 +743,13 @@ class DocConverterWidget(QWidget):
         # ------- 右：转换设置 -------
         self._build_settings_panel(top_layout)
 
-        splitter.addWidget(top_widget)
-
         # 下半：进度 + 日志 + 开始/停止
         bottom_widget = QWidget()
         self._build_progress_panel(bottom_widget)
-        splitter.addWidget(bottom_widget)
+        layout.addWidget(bottom_widget)
 
     def _build_file_panel(self, top_layout: QHBoxLayout):
         file_group = QGroupBox("待转换文档")
-        file_group.setMinimumHeight(320)
         file_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
@@ -766,8 +825,7 @@ class DocConverterWidget(QWidget):
 
     def _build_settings_panel(self, top_layout: QHBoxLayout):
         settings_group = QGroupBox("转换设置")
-        settings_group.setMinimumHeight(460)
-        settings_group.setMinimumWidth(540)
+        settings_group.setMinimumWidth(360)
         settings_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
@@ -832,17 +890,16 @@ class DocConverterWidget(QWidget):
                     extra="font-weight: 400; background: transparent;"
                 )
             )
-            lab.setMinimumWidth(100)
-            lab.setMaximumWidth(100)
+            lab.setMinimumWidth(80)
             lab.setSizePolicy(
-                QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred
+                QSizePolicy.Policy.MinimumExpanding, QSizePolicy.Policy.Preferred
             )
             lab.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
             row.addWidget(lab, 0)
             row.addWidget(right_widget, 1)
-            row.setStretch(0, 0)
-            row.setStretch(1, 1)
+            row.setStretch(0, 1)
+            row.setStretch(1, 3)
             return row_widget
 
         # 输出格式
@@ -952,91 +1009,6 @@ class DocConverterWidget(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(10)
 
-        # 进度
-        progress_group = QGroupBox("转换进度")
-        progress_group.setStyleSheet(f"""
-            QGroupBox {{
-                font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 12px;
-                background-color: {COLORS['card']};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }}
-            QProgressBar {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 4px;
-                text-align: center;
-                color: {COLORS['text']};
-                height: 20px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {COLORS['success']};
-                border-radius: 4px;
-            }}
-        """)
-        pg_layout = QVBoxLayout(progress_group)
-        pg_layout.setContentsMargins(12, 12, 12, 12)
-        pg_layout.setSpacing(8)
-
-        self.overall_progress_label = QLabel("总进度：0 / 0")
-        self.overall_progress_label.setStyleSheet(f"color: {COLORS['text']};")
-        self.overall_progress = QProgressBar()
-        self.overall_progress.setValue(0)
-        self.single_progress_label = QLabel("单任务进度：等待开始")
-        self.single_progress_label.setStyleSheet(f"color: {COLORS['text']};")
-        self.single_progress = QProgressBar()
-        self.single_progress.setValue(0)
-
-        pg_layout.addWidget(self.overall_progress_label)
-        pg_layout.addWidget(self.overall_progress)
-        pg_layout.addWidget(self.single_progress_label)
-        pg_layout.addWidget(self.single_progress)
-        outer.addWidget(progress_group)
-
-        # 日志
-        log_group = QGroupBox("运行日志")
-        log_group.setStyleSheet(f"""
-            QGroupBox {{
-                font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 8px;
-                margin-top: 10px;
-                padding-top: 12px;
-                background-color: {COLORS['card']};
-            }}
-            QGroupBox::title {{
-                subcontrol-origin: margin;
-                left: 12px;
-                padding: 0 6px;
-            }}
-        """)
-        log_layout = QVBoxLayout(log_group)
-        log_layout.setContentsMargins(12, 12, 12, 12)
-        self.log_text = QTextEdit()
-        self.log_text.setReadOnly(True)
-        self.log_text.setMinimumHeight(120)
-        self.log_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {COLORS['bg']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
-                border-radius: 6px;
-                font-family: 'Monospace', monospace;
-                font-size: 12px;
-            }}
-        """)
-        log_layout.addWidget(self.log_text)
-        outer.addWidget(log_group, 1)
-
         # 开始/停止按钮
         btn_row = QHBoxLayout()
         btn_row.setSpacing(12)
@@ -1097,82 +1069,47 @@ class DocConverterWidget(QWidget):
                 border-color: {COLORS['primary']};
             }}
         """)
-        self._suggest_install_btn = QPushButton("📦  一键安装文档增强库")
-        self._suggest_install_btn.clicked.connect(self._trigger_install_deps)
-        self._suggest_install_btn.setMinimumHeight(44)
-        self._suggest_install_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['accent']};
-                color: white;
-                border: none;
-                border-radius: 8px;
-                font-size: 15px;
-                font-weight: 600;
-            }}
-            QPushButton:hover {{
-                background-color: #ff6b86;
-            }}
-        """)
         btn_row.addWidget(self.convert_btn, 3)
         btn_row.addWidget(self.stop_btn, 1)
-        btn_row.addWidget(self._suggest_install_btn, 2)
         btn_row.addWidget(self.open_dir_btn, 2)
         outer.addLayout(btn_row)
 
     # ============================================================
-    # 日志 / 引擎状态
+    # 引擎状态
     # ============================================================
-    def _log(self, message: str, level: str = "info"):
-        c = self.theme_colors
-        now = time.strftime("%H:%M:%S")
-        color_map = {
-            "info": c.get("log_text", "#d4d4d4"),
-            "success": c["success"],
-            "warning": c["warning"],
-            "error": c["error"],
-        }
-        color = color_map.get(level, color_map["info"])
-        self.log_text.append(
-            f'<span style="color:#888;">[{now}]</span> <span style="color:{color};">{message}</span>'
-        )
-        sb = self.log_text.verticalScrollBar()
-        sb.setValue(sb.maximum())
-
     def _announce_engines(self):
         lines = []
         native_hits = [k for k, v in self.native_flags.items() if v]
         if native_hits:
             lines.append("✅ Python 原生库: " + ",".join(native_hits))
         else:
-            lines.append("❌ 无可用 Python 原生文档库（可点一键安装）")
-        if self.libreoffice_path:
-            lines.append(f"✅ LibreOffice: {self.libreoffice_path}")
-        else:
-            lines.append("⚠️ 未检测到 LibreOffice（推荐 `sudo apt install libreoffice` 获得最强互转能力）")
+            lines.append("❌ 无可用 Python 原生文档库（缺少依赖，请重新安装完整包）")
+
         if self.pandoc_path:
-            lines.append(f"✅ pandoc: {self.pandoc_path}")
+            lines.append(f"✅ pandoc (主力): {self.pandoc_path}")
         else:
-            lines.append("ℹ️ 未检测到 pandoc（标记语言互转可选，`sudo apt install pandoc`）")
+            lines.append("⚠️ 未检测到 pandoc（缺少依赖，请重新安装完整包）")
+
+        if self.wkhtmltopdf_path:
+            lines.append(f"✅ wkhtmltopdf: {self.wkhtmltopdf_path}")
+        elif not self.native_flags.get("weasyprint"):
+            lines.append("ℹ️ 未检测到 HTML→PDF 引擎（推荐 weasyprint 或 wkhtmltopdf）")
+
+        # 新增轻量扩展库状态
+        new_libs = []
+        if self.native_flags.get("python_pptx"):
+            new_libs.append("python-pptx")
+        if self.native_flags.get("pdf2docx"):
+            new_libs.append("pdf2docx")
+        if self.native_flags.get("weasyprint"):
+            new_libs.append("weasyprint")
+        if new_libs:
+            lines.append("✅ 轻量扩展库: " + ",".join(new_libs))
+        else:
+            lines.append("ℹ️ 可选轻量库未随包附带（缺少依赖，请重新安装完整包）")
 
         status_html = "<br>".join(lines)
         self.engine_status_label.setText("引擎状态：<br>" + status_html)
-        self._log("文档转换引擎探测结果：" + " / ".join(lines))
-
-        # 建议安装按钮显示与否
-        need_native = (
-            not self.native_flags.get("python_docx")
-            or not self.native_flags.get("docx2txt")
-            or not self.native_flags.get("openpyxl")
-            or not self.native_flags.get("fitz")
-            or not self.native_flags.get("PIL")
-        )
-        self._suggest_install_btn.setEnabled(True)
-        if need_native:
-            self._suggest_install_btn.setToolTip(
-                "推荐安装: python-docx / docx2txt / openpyxl / PyMuPDF / Pillow"
-            )
-        else:
-            self._suggest_install_btn.setToolTip("常用文档原生库已就绪，仍可继续安装其它增强插件。")
 
     # ============================================================
     # 文件列表 & 拖拽
@@ -1336,99 +1273,25 @@ class DocConverterWidget(QWidget):
 
     def _ensure_any_engine(self) -> bool:
         any_native = any(self.native_flags.values())
-        if any_native or self.libreoffice_path or self.pandoc_path:
+        if any_native or self.pandoc_path:
             return True
         dlg = QMessageBox(self)
         dlg.setIcon(QMessageBox.Icon.Warning)
         dlg.setWindowTitle("文档转换缺少依赖")
         dlg.setTextFormat(Qt.TextFormat.RichText)
         dlg.setText(
-            "当前环境缺少文档转换的三类引擎：<br><br>"
+            "当前环境缺少文档转换引擎：<br><br>"
             "① Python 原生文档库（python-docx / openpyxl / PyMuPDF / Pillow）<br>"
-            "② LibreOffice headless（99% 格式互转）<br>"
-            "③ pandoc（标记语言互转）<br><br>"
-            "<b>👉 推荐方案：</b><br>"
-            "1. 一键安装 Python 原生库（本程序内）<br>"
-            "2. 或执行命令：<code>sudo apt install libreoffice pandoc</code>"
+            "② pandoc（通用文档互转主力引擎）<br><br>"
+            "<b>缺少依赖，请重新安装完整包。</b>"
         )
-        btn_install = dlg.addButton("一键安装 Python 原生库（推荐）", QMessageBox.ButtonRole.AcceptRole)
         btn_anyway = dlg.addButton("仍继续（会失败，仅测试）", QMessageBox.ButtonRole.ActionRole)
         btn_cancel = dlg.addButton("取消", QMessageBox.ButtonRole.RejectRole)
         dlg.exec()
         clicked = dlg.clickedButton()
-        if clicked is btn_install:
-            self._trigger_install_deps()
-            return False
         if clicked is btn_anyway:
             return True
         return False
-
-    def _trigger_install_deps(self):
-        if self.install_worker and self.install_worker.isRunning():
-            QMessageBox.information(self, "提示", "已有安装任务正在运行。")
-            return
-
-        class DocPipInstallWorker(QThread):
-            finished_signal = Signal(bool, str)
-            log_signal = Signal(str)
-
-            def __init__(self_self):
-                super().__init__()
-                if getattr(sys, 'frozen', False):
-                    self_self.target = shutil.which("python3") or shutil.which("python") or "python3"
-                else:
-                    self_self.target = sys.executable
-                self_self.pkgs = [
-                    "python-docx", "docx2txt", "openpyxl",
-                    "pypdf", "PyMuPDF", "striprtf", "Markdown",
-                    "Pillow", "pillow-heif", "pillow-avif-plugin",
-                    "reportlab",
-                ]
-
-            def run(self_self):
-                try:
-                    self_self.log_signal.emit(f"[pip] 解释器: {self_self.target}")
-                    self_self.log_signal.emit(f"[pip] 包列表: {', '.join(self_self.pkgs)}")
-                    cmd = [self_self.target, "-m", "pip", "install", "--upgrade", *self_self.pkgs]
-                    r = subprocess.run(
-                        cmd, capture_output=True, text=True, timeout=600,
-                        encoding="utf-8", errors="replace"
-                    )
-                    for line in (r.stdout.splitlines() or [])[-10:]:
-                        if line.strip():
-                            self_self.log_signal.emit(f"[pip] {line}")
-                    if r.returncode != 0:
-                        tail = "\n".join((r.stderr.splitlines() or [])[-10:])
-                        self_self.log_signal.emit(f"[pip] 安装失败: {tail}")
-                        self_self.finished_signal.emit(False, f"pip 失败 exit={r.returncode}\n{tail}")
-                        return
-                    self_self.log_signal.emit("[pip] 全部安装完成！建议重启程序使原生引擎生效。")
-                    self_self.finished_signal.emit(True, "文档增强库已安装！请重启程序使原生 Python 引擎全部生效。")
-                except Exception as e:
-                    self_self.finished_signal.emit(False, f"pip 异常: {e}")
-
-        self.install_worker = DocPipInstallWorker()
-        self.install_worker.log_signal.connect(lambda m: self._log(m, level="warning"))
-        self.install_worker.finished_signal.connect(self._on_deps_installed)
-        self._log("📦 开始安装文档增强库（python-docx、openpyxl、PyMuPDF、Pillow…），请稍候…", level="warning")
-        self.convert_btn.setEnabled(False)
-        self.install_worker.start()
-
-    def _on_deps_installed(self, success: bool, msg: str):
-        if success:
-            self._log(msg, level="success")
-            QMessageBox.information(self, "安装成功", msg)
-            self.native_flags = _probe_native_engines()
-            self._announce_engines()
-        else:
-            self._log(msg, level="error")
-            QMessageBox.critical(
-                self, "安装失败",
-                msg + "\n\n请手动：\n"
-                + (self.install_worker.target if hasattr(self, 'install_worker') and self.install_worker else "python3")
-                + " -m pip install --upgrade python-docx docx2txt openpyxl pypdf PyMuPDF striprtf Markdown Pillow pillow-heif pillow-avif-plugin reportlab"
-            )
-        self.convert_btn.setEnabled(not (self.worker and self.worker.isRunning()))
 
     def _start_conversion(self):
         if not self._ensure_any_engine():
@@ -1442,67 +1305,40 @@ class DocConverterWidget(QWidget):
 
         self.convert_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.overall_progress.setValue(0)
-        self.single_progress.setValue(0)
-        self.overall_progress_label.setText(f"总进度：0 / {len(tasks)}")
 
         self.worker = DocConversionWorker(
             tasks,
-            libreoffice_path=self.libreoffice_path,
             pandoc_path=self.pandoc_path,
+            wkhtmltopdf_path=self.wkhtmltopdf_path,
             native_flags=self.native_flags,
         )
         self.worker.progress_signal.connect(self._on_overall_progress)
-        self.worker.single_progress_signal.connect(self._on_single_progress)
         self.worker.task_started_signal.connect(self._on_task_started)
         self.worker.task_finished_signal.connect(self._on_task_finished)
-        self.worker.log_signal.connect(self._log)
         self.worker.all_done_signal.connect(self._on_all_done)
         self.worker.start()
 
     def _stop_conversion(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
-            self._log("⏹  收到停止请求，将在下一个任务前退出…")
             self.stop_btn.setEnabled(False)
 
     # ============================================================
     # 进度回调
     # ============================================================
     def _on_overall_progress(self, current, total):
-        pct = int(current / max(1, total) * 100)
-        self.overall_progress.setValue(pct)
-        self.overall_progress_label.setText(f"总进度：{current} / {total}  ({pct}%)")
-
-    def _on_single_progress(self, value):
-        self.single_progress.setValue(value)
+        pass
 
     def _on_task_started(self, name):
-        self.single_progress_label.setText(f"单任务进度：{name} 处理中…")
-        self.single_progress.setValue(0)
+        self.task_monitor_signal.emit(name)
 
     def _on_task_finished(self, result: DocConversionResult):
-        c = self.theme_colors
-        if result.success:
-            self.single_progress_label.setText(
-                f"单任务进度：✔ {os.path.basename(result.task.output_path)} 完成"
-            )
-            color = c["success"]
-        else:
-            self.single_progress_label.setText(
-                f"单任务进度：✗ {os.path.basename(result.task.input_path)} 失败"
-            )
-            color = c["error"]
-        self._log(
-            f"{'[成功]' if result.success else '[失败]'}  "
-            f"{os.path.basename(result.task.input_path)}  →  "
-            f"{os.path.basename(result.task.output_path)}  |  {result.message}",
-            level="success" if result.success else "error"
-        )
+        pass
 
     def _on_all_done(self):
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.task_monitor_signal.emit("")
 
     # ==================== 主题 / 默认输出目录支持 ====================
 
@@ -1638,46 +1474,6 @@ class DocConverterWidget(QWidget):
             }}
         """)
 
-        # --- 进度条 ---
-        progress_bar_style = f"""
-            QProgressBar {{
-                border: 1px solid {c['border']};
-                border-radius: 4px;
-                text-align: center;
-                background-color: {c['bg']};
-                color: {c['text']};
-                height: 22px;
-            }}
-            QProgressBar::chunk {{
-                background-color: {c['primary']};
-                border-radius: 3px;
-            }}
-        """
-        self.overall_progress.setStyleSheet(progress_bar_style)
-        self.single_progress.setStyleSheet(progress_bar_style)
-
-        self.overall_progress_label.setStyleSheet(
-            f"color: {c['text']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-        self.single_progress_label.setStyleSheet(
-            f"color: {c['success']}; font-weight: 600; font-size: 13px; padding: 2px 4px;"
-        )
-
-        # --- 日志面板 ---
-        log_bg = c.get("log_bg", "#1e1e1e")
-        log_text_color = c.get("log_text", "#d4d4d4")
-        self.log_text.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {log_bg};
-                color: {log_text_color};
-                border: 1px solid {c['border']};
-                border-radius: 6px;
-                padding: 8px;
-                font-family: Consolas, monospace;
-                font-size: 12px;
-            }}
-        """)
-
         # --- 底部操作按钮 ---
         self.convert_btn.setStyleSheet(f"""
             QPushButton {{
@@ -1725,22 +1521,5 @@ class DocConverterWidget(QWidget):
             QPushButton:hover {{
                 background-color: {c["card_hover"]};
                 border-color: {c["success"]};
-            }}
-        """)
-        self._suggest_install_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {c["primary"]};
-                color: white;
-                font-weight: bold;
-                font-size: 14px;
-                border-radius: 8px;
-                border: none;
-            }}
-            QPushButton:hover {{
-                background-color: {c.get('primary_hover', '#1a4a80')};
-            }}
-            QPushButton:disabled {{
-                background-color: {c.get('btn_disabled_bg', '#2a3a4a')};
-                color: {c.get('btn_disabled_text', '#555555')};
             }}
         """)
