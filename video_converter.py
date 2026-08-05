@@ -291,6 +291,7 @@ class VideoConversionWorker(BaseConversionWorker):
 
 class VideoConverterWidget(QWidget):
     task_monitor_signal = Signal(str)
+    log_signal = Signal(str, str)
     def __init__(self, ffmpeg_mgr, default_output_dir: str = ""):
         super().__init__()
         self.ffmpeg_mgr = ffmpeg_mgr
@@ -849,12 +850,20 @@ class VideoConverterWidget(QWidget):
         )
         self.worker.progress_signal.connect(self._on_progress)
         self.worker.task_started_signal.connect(self._on_task_started)
+        self.worker.task_finished_signal.connect(self._on_task_finished)
         self.worker.all_done_signal.connect(self._on_all_done)
         self.worker.start()
+
+        output_format = self.format_combo.currentData()
+        self.log_signal.emit(
+            "info",
+            f"🎬 视频转换启动：共 {total} 个文件 → 输出格式 {str(output_format or '').upper()}"
+        )
 
     def _stop_conversion(self):
         if self.worker:
             self.worker.stop()
+            self.log_signal.emit("warning", "🎬 视频转换已被用户停止")
 
     @Slot(int, int)
     def _on_progress(self, current: int, total: int):
@@ -863,12 +872,26 @@ class VideoConverterWidget(QWidget):
     @Slot(str)
     def _on_task_started(self, filename: str):
         self.task_monitor_signal.emit(filename)
+        self.log_signal.emit("info", f"🎬 正在转换: {filename}")
+
+    @Slot(object)
+    def _on_task_finished(self, result):
+        basename = os.path.basename(getattr(result.task, "input_path", ""))
+        msg = (getattr(result, "message", "") or "").strip()
+        first_line = msg.splitlines()[0] if msg else ""
+        if len(first_line) > 120:
+            first_line = first_line[:117] + "..."
+        if getattr(result, "success", False):
+            self.log_signal.emit("success", f"🎬 {basename} — {first_line or '转换成功'}")
+        else:
+            self.log_signal.emit("error", f"🎬 {basename} — {first_line or '转换失败'}")
 
     @Slot()
     def _on_all_done(self):
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.task_monitor_signal.emit("")
+        self.log_signal.emit("info", "🎬 视频转换全部完成")
         QMessageBox.information(self, "完成", "所有转换任务已处理完毕！")
 
     # ==================== 主题 / 默认输出目录支持 ====================

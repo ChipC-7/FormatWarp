@@ -20,6 +20,7 @@ from image_converter import ImageConverterWidget
 from doc_converter import DocConverterWidget
 from settings_widget import SettingsWidget
 from conversion_monitor import ConversionMonitorWidget
+from log_viewer import LogViewerWidget
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -110,7 +111,8 @@ class MainWindow(QMainWindow):
             ("🖼️  图片转换", 2),
             ("📄 文档转换", 3),
             ("📊 转换监控", 4),
-            ("⚙️  全局设置", 5),
+            ("📋 运行日志", 5),
+            ("⚙️  全局设置", 6),
         ]
         
         for text, index in nav_items:
@@ -139,17 +141,19 @@ class MainWindow(QMainWindow):
         self.image_widget = ImageConverterWidget(self.ffmpeg_mgr, default_output_dir=default_out)
         self.doc_widget   = DocConverterWidget(default_output_dir=default_out)
         self.monitor_widget = ConversionMonitorWidget()
+        self.log_widget = LogViewerWidget(self.ffmpeg_mgr)
         self.settings_widget = SettingsWidget(
             initial_theme=ThemeManager.instance().current_theme,
             initial_output_dir=default_out,
         )
-        
+
         self.content_stack.addWidget(self.audio_widget)    # index 0
         self.content_stack.addWidget(self.video_widget)    # index 1
         self.content_stack.addWidget(self.image_widget)    # index 2
         self.content_stack.addWidget(self.doc_widget)      # index 3
         self.content_stack.addWidget(self.monitor_widget)  # index 4
-        self.content_stack.addWidget(self.settings_widget) # index 5
+        self.content_stack.addWidget(self.log_widget)      # index 5
+        self.content_stack.addWidget(self.settings_widget) # index 6
         
         
         main_layout.addWidget(self.content_stack, 1)
@@ -178,6 +182,7 @@ class MainWindow(QMainWindow):
         tm.theme_changed.connect(self.image_widget.reapply_theme)
         tm.theme_changed.connect(self.doc_widget.reapply_theme)
         tm.theme_changed.connect(self.monitor_widget.reapply_theme)
+        tm.theme_changed.connect(self.log_widget.reapply_theme)
         tm.theme_changed.connect(self.settings_widget.reapply_theme)
         # 默认输出目录变化 -> 四个转换模块同步更新
         self.settings_widget.default_output_dir_changed.connect(
@@ -205,6 +210,11 @@ class MainWindow(QMainWindow):
         self.doc_widget.task_monitor_signal.connect(
             lambda name: self.monitor_widget.clear_module("📄 文档") if not name else self.monitor_widget.add_task("📄 文档", name)
         )
+        # 日志信号 -> 日志查看器
+        self.audio_widget.log_signal.connect(self.log_widget.append_log)
+        self.video_widget.log_signal.connect(self.log_widget.append_log)
+        self.image_widget.log_signal.connect(self.log_widget.append_log)
+        self.doc_widget.log_signal.connect(self.log_widget.append_log)
 
     def _check_ffmpeg(self):
         custom_path = self.settings.value("MainWindow/custom_ffmpeg", "")
@@ -217,9 +227,19 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(
             f"✓ FFmpeg 已就绪 [{self.ffmpeg_mgr.source}]  |  {self.ffmpeg_mgr.ffmpeg_path}", 5000
         )
+        self.log_widget.update_engine_status(self.ffmpeg_mgr)
+        self.log_widget.append_log(
+            "success",
+            f"FFmpeg 已就绪：{self.ffmpeg_mgr.source}  |  {self.ffmpeg_mgr.ffmpeg_path}"
+        )
 
     def _ffmpeg_failed(self):
         self.status_bar.showMessage("✗ FFmpeg 未检测到 — 音视频暂不可用（图片转换仍可使用 Pillow 或一键安装）", 0)
+        self.log_widget.update_engine_status(self.ffmpeg_mgr)
+        self.log_widget.append_log(
+            "error",
+            "FFmpeg 未检测到 — 音视频转换不可用（图片转换仍可使用 Pillow）"
+        )
 
     def _show_settings_dialog(self):
         dialog = QMessageBox(self)
@@ -286,6 +306,10 @@ class MainWindow(QMainWindow):
             if self.ffmpeg_mgr.detect_custom(path):
                 self.settings.setValue("MainWindow/custom_ffmpeg", path)
                 self.status_bar.showMessage(f"✓ FFmpeg 已手动指定  |  {path}", 5000)
+                self.log_widget.update_engine_status(self.ffmpeg_mgr)
+                self.log_widget.append_log(
+                    "success", f"FFmpeg 已手动指定：{path}"
+                )
                 QMessageBox.information(self, "FFmpeg 设置成功",
                     f"已选择：\n\n"
                     f"路径: {path}\n"

@@ -567,6 +567,7 @@ class PipInstallWorker(QThread):
 
 class ImageConverterWidget(QWidget):
     task_monitor_signal = Signal(str)
+    log_signal = Signal(str, str)
 
     def __init__(self, ffmpeg_mgr, default_output_dir: str = ""):
         super().__init__()
@@ -1176,24 +1177,41 @@ class ImageConverterWidget(QWidget):
         self.worker.all_done_signal.connect(self._on_all_done)
         self.worker.start()
 
+        output_format = self.format_combo.currentData()
+        self.log_signal.emit(
+            "info",
+            f"🖼️ 图片转换启动：共 {len(tasks)} 个文件 → 输出格式 {str(output_format or '').upper()}"
+        )
+
     def _stop_conversion(self):
         if self.worker and self.worker.isRunning():
             self.worker.cancel()
             self.stop_btn.setEnabled(False)
+            self.log_signal.emit("warning", "🖼️ 图片转换已被用户停止")
 
     def _on_overall_progress(self, current, total):
         pass
 
     def _on_task_started(self, name):
         self.task_monitor_signal.emit(name)
+        self.log_signal.emit("info", f"🖼️ 正在转换: {name}")
 
     def _on_task_finished(self, result: ImageConversionResult):
-        pass
+        basename = os.path.basename(getattr(result.task, "input_path", ""))
+        msg = (getattr(result, "message", "") or "").strip()
+        first_line = msg.splitlines()[0] if msg else ""
+        if len(first_line) > 120:
+            first_line = first_line[:117] + "..."
+        if getattr(result, "success", False):
+            self.log_signal.emit("success", f"🖼️ {basename} — {first_line or '转换成功'}")
+        else:
+            self.log_signal.emit("error", f"🖼️ {basename} — {first_line or '转换失败'}")
 
     def _on_all_done(self):
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.task_monitor_signal.emit("")
+        self.log_signal.emit("info", "🖼️ 图片转换全部完成")
 
     # ==================== 主题 / 默认输出目录支持 ====================
 
