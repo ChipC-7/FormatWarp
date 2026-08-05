@@ -17,9 +17,9 @@ except Exception:
     QApplication = None
 
 # ============ 配置常量 ============
-APP_NAME = "通用格式转换器"
-APP_VERSION = "1.0.0"
-ORG_NAME = "UniversalConverter"
+APP_NAME = "格式跃迁"
+APP_VERSION = "1.0.1"
+ORG_NAME = "FormatWarp"
 
 # 主题配色 —— 暗色（当前默认，完全保持不变）
 COLORS_DARK = {
