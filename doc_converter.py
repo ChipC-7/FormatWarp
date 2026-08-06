@@ -21,7 +21,7 @@ from PySide6.QtGui import (
     QDragEnterEvent, QDropEvent, QPixmap, QPainter, QColor, QPen, QBrush,
     QPainterPath, QIcon
 )
-from utils import COLORS, BaseConversionWorker, get_cjk_font_qss, ThemeManager
+from utils import BaseConversionWorker, get_cjk_font_qss, ThemeManager, hex_with_alpha
 
 
 # 文档格式定义
@@ -82,7 +82,8 @@ class DocConversionResult:
 # ============================================================
 # 通用 helper
 # ============================================================
-def _make_checkbox_icon_pixmap(checked: bool, accent_hex: str, size=22, radius=5):
+def _make_checkbox_icon_pixmap(checked: bool, accent_hex: str, size=22, radius=5,
+                              bg_hex: str = "#1a1a2e", border_hex: str = "#0f3460"):
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -102,8 +103,8 @@ def _make_checkbox_icon_pixmap(checked: bool, accent_hex: str, size=22, radius=5
         p.drawLine(int(size * 0.22), int(size * 0.55), int(size * 0.44), int(size * 0.76))
         p.drawLine(int(size * 0.40), int(size * 0.76), int(size * 0.80), int(size * 0.26))
     else:
-        p.setBrush(QBrush(QColor(COLORS['bg'])))
-        pen = QPen(QColor(COLORS['border']))
+        p.setBrush(QBrush(QColor(bg_hex)))
+        pen = QPen(QColor(border_hex))
         pen.setWidth(2)
         p.setPen(pen)
         path = QPainterPath()
@@ -690,12 +691,15 @@ class DocConversionWorker(QThread):
 class DocConverterWidget(QWidget):
     task_monitor_signal = Signal(str)
     log_signal = Signal(str, str)
-
+    task_progress_signal = Signal(str, str, int)
+    task_result_signal = Signal(str, str, bool, str)
     def __init__(self, default_output_dir: str = ""):
         super().__init__()
         self.worker = None
         self.theme_colors = ThemeManager.instance().current_colors
         self._default_output_dir = (default_output_dir or "").strip()
+        self._current_task_filename = ""
+        self._module_name = "📄 文档"
 
         # 引擎探测
         self.native_flags: dict = _probe_native_engines()
@@ -706,16 +710,13 @@ class DocConverterWidget(QWidget):
         self._apply_widget_styles()
         if self._default_output_dir and not self.output_path_edit.text().strip():
             self.output_path_edit.setText(self._default_output_dir)
-        try:
-            ThemeManager.instance().theme_changed.connect(self.reapply_theme)
-        except Exception:
-            pass
         QTimer.singleShot(200, self._announce_engines)
 
     # ============================================================
     # UI 构建
     # ============================================================
     def _setup_ui(self):
+        c = self.theme_colors
         self.setMinimumWidth(700)
         self.resize(1000, 700)
 
@@ -724,9 +725,9 @@ class DocConverterWidget(QWidget):
         layout.setSpacing(14)
 
         title_label = QLabel("📄  文档格式转换")
-        title_label.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {COLORS['text']};")
+        title_label.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {self.theme_colors['text']};")
         subtitle_label = QLabel("支持 PDF / Word / Excel / PPT / Markdown / HTML / EPUB 等批量互转（Python原生库 + pandoc + pdf2docx + python-pptx 轻量引擎链）")
-        subtitle_label.setStyleSheet(f"font-size: 13px; color: {COLORS['text_secondary']};")
+        subtitle_label.setStyleSheet(f"font-size: 13px; color: {self.theme_colors['text_secondary']};")
         title_layout = QVBoxLayout()
         title_layout.addWidget(title_label)
         title_layout.addWidget(subtitle_label)
@@ -754,12 +755,12 @@ class DocConverterWidget(QWidget):
         file_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 16px;
-                background-color: {COLORS['card']};
+                background-color: {self.theme_colors['card']};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -780,18 +781,18 @@ class DocConverterWidget(QWidget):
         self.file_list.setMinimumHeight(280)
         self.file_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['bg']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 6px;
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 padding: 4px;
             }}
             QListWidget::item {{
                 padding: 8px;
-                border-bottom: 1px solid {COLORS['border']};
+                border-bottom: 1px solid {self.theme_colors['border']};
             }}
             QListWidget::item:selected {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
                 color: white;
             }}
         """)
@@ -807,17 +808,17 @@ class DocConverterWidget(QWidget):
         for btn in [self.add_btn, self.remove_btn, self.clear_btn]:
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background-color: {COLORS['card_hover']};
-                    color: {COLORS['text']};
-                    border: 1px solid {COLORS['border']};
+                    background-color: {self.theme_colors['card_hover']};
+                    color: {self.theme_colors['text']};
+                    border: 1px solid {self.theme_colors['border']};
                     border-radius: 4px;
                     padding: 6px 12px;
                     font-size: 13px;
                 }}
                 QPushButton:hover {{
-                    background-color: {COLORS['primary']};
+                    background-color: {self.theme_colors['primary']};
                     color: white;
-                    border-color: {COLORS['primary']};
+                    border-color: {self.theme_colors['primary']};
                 }}
             """)
             file_btn_layout.addWidget(btn)
@@ -825,17 +826,18 @@ class DocConverterWidget(QWidget):
         top_layout.addWidget(file_group, 3)
 
     def _build_settings_panel(self, top_layout: QHBoxLayout):
+        c = self.theme_colors
         settings_group = QGroupBox("转换设置")
         settings_group.setMinimumWidth(360)
         settings_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 4px;
-                background-color: {COLORS['card']};
+                background-color: {self.theme_colors['card']};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -850,19 +852,19 @@ class DocConverterWidget(QWidget):
 
         input_style = f"""
             QComboBox, QLineEdit, QSpinBox {{
-                background-color: {COLORS['bg']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['bg']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
                 font-size: 13px;
                 min-height: 22px;
             }}
             QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{
-                border-color: {COLORS['primary']};
+                border-color: {self.theme_colors['primary']};
             }}
             QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{
-                border-color: {COLORS['success']};
+                border-color: {self.theme_colors['success']};
             }}
             QComboBox::drop-down {{
                 border: none;
@@ -887,7 +889,7 @@ class DocConverterWidget(QWidget):
             lab.setStyleSheet(
                 get_cjk_font_qss(
                     font_size_px=14,
-                    color=COLORS['text'],
+                    color=self.theme_colors['text'],
                     extra="font-weight: 400; background: transparent;"
                 )
             )
@@ -919,16 +921,16 @@ class DocConverterWidget(QWidget):
         self.output_browse_btn = QPushButton("📂 浏览")
         self.output_browse_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS['card_hover']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['card_hover']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
             }}
             QPushButton:hover {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
                 color: white;
-                border-color: {COLORS['primary']};
+                border-color: {self.theme_colors['primary']};
             }}
         """)
         self.output_browse_btn.clicked.connect(self._browse_output_dir)
@@ -952,7 +954,9 @@ class DocConverterWidget(QWidget):
 
         # 保留原文件结构（文件夹输入时） 复用 overwrite 模式
         self.overwrite_check = QPushButton(
-            QIcon(_make_checkbox_icon_pixmap(False, COLORS['accent'])),
+            QIcon(_make_checkbox_icon_pixmap(False, self.theme_colors['accent'],
+                                             bg_hex=self.theme_colors['bg'],
+                                             border_hex=self.theme_colors['border'])),
             "  重名文件 — 直接覆盖 (否则自动重命名)"
         )
         self.overwrite_check.setCheckable(True)
@@ -962,7 +966,7 @@ class DocConverterWidget(QWidget):
         self.overwrite_check.setMinimumHeight(38)
         self.overwrite_check.setStyleSheet(f"""
             QPushButton {{
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 font-size: 14px;
                 font-weight: 500;
                 padding: 6px 12px 6px 10px;
@@ -972,16 +976,19 @@ class DocConverterWidget(QWidget):
                 text-align: left;
             }}
             QPushButton:hover {{
-                background-color: rgba(233, 69, 96, 0.10);
+                background-color: {hex_with_alpha(c['accent'], 0.10)};
             }}
             QPushButton:checked {{
-                background-color: rgba(233, 69, 96, 0.18);
-                color: #ffffff;
+                background-color: {hex_with_alpha(c['accent'], 0.18)};
+                color: {c['text']};
                 font-weight: 600;
             }}
         """)
         def _on_over_toggled(c):
-            self.overwrite_check.setIcon(QIcon(_make_checkbox_icon_pixmap(c, COLORS['accent'])))
+            self.overwrite_check.setIcon(QIcon(_make_checkbox_icon_pixmap(
+                c, self.theme_colors['accent'],
+                bg_hex=self.theme_colors['bg'],
+                border_hex=self.theme_colors['border'])))
         self.overwrite_check.toggled.connect(_on_over_toggled)
         cb2 = QHBoxLayout()
         cb2.addSpacing(108)
@@ -992,11 +999,11 @@ class DocConverterWidget(QWidget):
         # 引擎状态面板（只读 label，启动后显示探测结果）
         self.engine_status_label = QLabel("引擎状态：加载中…")
         self.engine_status_label.setStyleSheet(
-            f"color: {COLORS['text_secondary']};"
+            f"color: {self.theme_colors['text_secondary']};"
             "font-size: 12px;"
             "padding: 6px 10px;"
-            f"background-color: {COLORS['bg']};"
-            f"border: 1px solid {COLORS['border']};"
+            f"background-color: {self.theme_colors['bg']};"
+            f"border: 1px solid {self.theme_colors['border']};"
             "border-radius: 6px;"
         )
         self.engine_status_label.setWordWrap(True)
@@ -1018,7 +1025,7 @@ class DocConverterWidget(QWidget):
         self.convert_btn.setMinimumHeight(44)
         self.convert_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS['success']};
+                background-color: {self.theme_colors['success']};
                 color: white;
                 border: none;
                 border-radius: 8px;
@@ -1026,11 +1033,11 @@ class DocConverterWidget(QWidget):
                 font-weight: 600;
             }}
             QPushButton:hover {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
             }}
             QPushButton:disabled {{
-                background-color: {COLORS['card_hover']};
-                color: {COLORS['text_secondary']};
+                background-color: {self.theme_colors['card_hover']};
+                color: {self.theme_colors['text_secondary']};
             }}
         """)
         self.stop_btn = QPushButton("⏹  停止")
@@ -1039,7 +1046,7 @@ class DocConverterWidget(QWidget):
         self.stop_btn.setMinimumHeight(44)
         self.stop_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS['error']};
+                background-color: {self.theme_colors['error']};
                 color: white;
                 border: none;
                 border-radius: 8px;
@@ -1048,8 +1055,8 @@ class DocConverterWidget(QWidget):
             }}
             QPushButton:hover {{ background-color: #ff6b6b; }}
             QPushButton:disabled {{
-                background-color: {COLORS['card_hover']};
-                color: {COLORS['text_secondary']};
+                background-color: {self.theme_colors['card_hover']};
+                color: {self.theme_colors['text_secondary']};
             }}
         """)
         self.open_dir_btn = QPushButton("📂  打开输出目录")
@@ -1057,17 +1064,17 @@ class DocConverterWidget(QWidget):
         self.open_dir_btn.setMinimumHeight(44)
         self.open_dir_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS['card_hover']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['card_hover']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 font-size: 15px;
                 font-weight: 600;
             }}
             QPushButton:hover {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
                 color: white;
-                border-color: {COLORS['primary']};
+                border-color: {self.theme_colors['primary']};
             }}
         """)
         btn_row.addWidget(self.convert_btn, 3)
@@ -1317,6 +1324,7 @@ class DocConverterWidget(QWidget):
         self.worker.task_started_signal.connect(self._on_task_started)
         self.worker.task_finished_signal.connect(self._on_task_finished)
         self.worker.all_done_signal.connect(self._on_all_done)
+        self.worker.single_progress_signal.connect(self._on_single_progress)
         self.worker.start()
 
         output_format = self.format_combo.currentData()
@@ -1338,23 +1346,41 @@ class DocConverterWidget(QWidget):
         pass
 
     def _on_task_started(self, name):
+        self._current_task_filename = name
         self.task_monitor_signal.emit(name)
         self.log_signal.emit("info", f"📄 正在转换: {name}")
+        self.task_progress_signal.emit(self._module_name, name, 0)
+
+    @Slot(int)
+    def _on_single_progress(self, progress: int):
+        if self._current_task_filename:
+            self.task_progress_signal.emit(
+                self._module_name, self._current_task_filename, progress
+            )
 
     def _on_task_finished(self, result: DocConversionResult):
         basename = os.path.basename(getattr(result.task, "input_path", ""))
+        full_path = getattr(result.task, "input_path", "")
+        filename = basename if basename else os.path.basename(full_path) or ""
         msg = (getattr(result, "message", "") or "").strip()
         first_line = msg.splitlines()[0] if msg else ""
         if len(first_line) > 120:
             first_line = first_line[:117] + "..."
-        if getattr(result, "success", False):
+        success = bool(getattr(result, "success", False))
+        if success:
             self.log_signal.emit("success", f"📄 {basename} — {first_line or '转换成功'}")
         else:
             self.log_signal.emit("error", f"📄 {basename} — {first_line or '转换失败'}")
+        self.task_result_signal.emit(self._module_name, filename, success, msg)
 
     def _on_all_done(self):
+        if self._current_task_filename:
+            self.task_progress_signal.emit(
+                self._module_name, self._current_task_filename, 100
+            )
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self._current_task_filename = ""
         self.task_monitor_signal.emit("")
         self.log_signal.emit("info", "📄 文档转换全部完成")
 

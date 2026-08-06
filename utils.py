@@ -93,6 +93,18 @@ COLORS_LIGHT = {
 COLORS = COLORS_DARK
 
 
+def hex_with_alpha(hex_color: str, alpha: float) -> str:
+    """将 #rrggbb 转为 rgba(r, g, b, a)。"""
+    s = hex_color.strip().lstrip("#")
+    if len(s) == 3:
+        s = "".join(ch * 2 for ch in s)
+    r = int(s[0:2], 16)
+    g = int(s[2:4], 16)
+    b = int(s[4:6], 16)
+    a = max(0.0, min(1.0, float(alpha)))
+    return f"rgba({r}, {g}, {b}, {a:.2f})"
+
+
 def get_colors_for_theme(theme_name: Optional[str]) -> dict:
     name = (theme_name or "dark").lower()
     if name == "light":

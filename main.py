@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QSettings, QSize, Slot
 from PySide6.QtGui import QFont, QColor
 
-from utils import APP_NAME, APP_VERSION, ORG_NAME, COLORS, FFmpegManager, get_main_stylesheet, apply_global_cjk_font, ThemeManager
+from utils import APP_NAME, APP_VERSION, ORG_NAME, FFmpegManager, get_main_stylesheet, apply_global_cjk_font, ThemeManager
 from audio_converter import AudioConverterWidget
 from video_converter import VideoConverterWidget
 from image_converter import ImageConverterWidget
@@ -26,7 +26,7 @@ from log_viewer import LogViewerWidget
 class LoadingDialog(QDialog):
     """启动加载界面：显示应用名 + 进度条 + 当前状态文字。"""
 
-    def __init__(self):
+    def __init__(self, colors: dict | None = None):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.setWindowFlags(
@@ -35,18 +35,24 @@ class LoadingDialog(QDialog):
         self.setModal(True)
         self.setFixedSize(440, 220)
 
+        c = colors or ThemeManager.instance().current_colors
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(32, 32, 32, 24)
         layout.setSpacing(8)
 
         # Logo + 应用名
         title_label = QLabel(f"🛠️  {APP_NAME}")
-        title_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #eaeaea;")
+        title_label.setStyleSheet(
+            f"font-size: 24px; font-weight: bold; color: {c['text']};"
+        )
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title_label)
 
         version_label = QLabel(f"v{APP_VERSION}")
-        version_label.setStyleSheet("font-size: 12px; color: #a0a0a0;")
+        version_label.setStyleSheet(
+            f"font-size: 12px; color: {c['text_secondary']};"
+        )
         version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(version_label)
 
@@ -62,23 +68,25 @@ class LoadingDialog(QDialog):
 
         # 状态文字
         self.status_label = QLabel("正在初始化…")
-        self.status_label.setStyleSheet("font-size: 12px; color: #a0a0a0;")
+        self.status_label.setStyleSheet(
+            f"font-size: 12px; color: {c['text_secondary']};"
+        )
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.status_label)
 
-        # 暗色背景 + 圆角（与默认主题一致）
+        # 主题背景 + 圆角
         self.setStyleSheet(f"""
             QDialog {{
-                background-color: {COLORS['bg']};
+                background-color: {c['bg']};
                 border-radius: 12px;
             }}
             QProgressBar {{
-                background-color: {COLORS['card']};
-                border: 1px solid {COLORS['border']};
+                background-color: {c['card']};
+                border: 1px solid {c['border']};
                 border-radius: 4px;
             }}
             QProgressBar::chunk {{
-                background-color: {COLORS['success']};
+                background-color: {c['success']};
                 border-radius: 4px;
             }}
         """)
@@ -99,7 +107,7 @@ class MainWindow(QMainWindow):
         self.resize(1200, 800)
 
         # 加载界面：先显示，覆盖整个初始化过程
-        self._loading = LoadingDialog()
+        self._loading = LoadingDialog(ThemeManager.instance().current_colors)
         self._loading.show()
         QApplication.processEvents()
 
@@ -191,13 +199,13 @@ class MainWindow(QMainWindow):
         self.nav_list.setObjectName("navList")
         
         nav_items = [
-            ("🎵 音频转换", 0),
-            ("🎬 视频转换", 1),
-            ("🖼️  图片转换", 2),
-            ("📄 文档转换", 3),
-            ("📊 转换监控", 4),
-            ("📋 运行日志", 5),
-            ("⚙️  全局设置", 6),
+            ("音频转换", 0),
+            ("视频转换", 1),
+            ("图片转换", 2),
+            ("文档转换", 3),
+            ("转换监控", 4),
+            ("运行日志", 5),
+            ("全局设置", 6),
         ]
         
         for text, index in nav_items:
@@ -284,17 +292,27 @@ class MainWindow(QMainWindow):
         )
         # 转换任务信号 -> 监视器
         self.audio_widget.task_monitor_signal.connect(
-            lambda name: self.monitor_widget.clear_module("🎵 音频") if not name else self.monitor_widget.add_task("🎵 音频", name)
+            lambda name: self.monitor_widget.clear_module("音频") if not name else self.monitor_widget.add_task("音频", name)
         )
         self.video_widget.task_monitor_signal.connect(
-            lambda name: self.monitor_widget.clear_module("🎬 视频") if not name else self.monitor_widget.add_task("🎬 视频", name)
+            lambda name: self.monitor_widget.clear_module("视频") if not name else self.monitor_widget.add_task("视频", name)
         )
         self.image_widget.task_monitor_signal.connect(
-            lambda name: self.monitor_widget.clear_module("🖼️ 图片") if not name else self.monitor_widget.add_task("🖼️ 图片", name)
+            lambda name: self.monitor_widget.clear_module("图片") if not name else self.monitor_widget.add_task("图片", name)
         )
         self.doc_widget.task_monitor_signal.connect(
-            lambda name: self.monitor_widget.clear_module("📄 文档") if not name else self.monitor_widget.add_task("📄 文档", name)
+            lambda name: self.monitor_widget.clear_module("文档") if not name else self.monitor_widget.add_task("文档", name)
         )
+        # 任务进度信号 -> 监视器进度条
+        self.audio_widget.task_progress_signal.connect(self.monitor_widget.set_task_progress)
+        self.video_widget.task_progress_signal.connect(self.monitor_widget.set_task_progress)
+        self.image_widget.task_progress_signal.connect(self.monitor_widget.set_task_progress)
+        self.doc_widget.task_progress_signal.connect(self.monitor_widget.set_task_progress)
+        # 任务结果信号 -> 监视器结果区
+        self.audio_widget.task_result_signal.connect(self.monitor_widget.add_result)
+        self.video_widget.task_result_signal.connect(self.monitor_widget.add_result)
+        self.image_widget.task_result_signal.connect(self.monitor_widget.add_result)
+        self.doc_widget.task_result_signal.connect(self.monitor_widget.add_result)
         # 日志信号 -> 日志查看器
         self.audio_widget.log_signal.connect(self.log_widget.append_log)
         self.video_widget.log_signal.connect(self.log_widget.append_log)

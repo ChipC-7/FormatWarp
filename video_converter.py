@@ -14,7 +14,7 @@ from PySide6.QtGui import (
     QDragEnterEvent, QDropEvent, QPixmap, QPainter, QColor, QPen, QBrush,
     QPainterPath, QIcon
 )
-from utils import COLORS, BaseConversionWorker, get_cjk_font_qss, ThemeManager
+from utils import BaseConversionWorker, get_cjk_font_qss, ThemeManager, hex_with_alpha
 
 # 视频专用配置 (大幅扩充)
 SUPPORTED_VIDEO_FORMATS = {
@@ -286,28 +286,29 @@ class VideoConversionWorker(BaseConversionWorker):
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
             return float(result.stdout.strip())
-        except:
+        except Exception:
             return 0.0
 
 class VideoConverterWidget(QWidget):
     task_monitor_signal = Signal(str)
     log_signal = Signal(str, str)
+    task_progress_signal = Signal(str, str, int)
+    task_result_signal = Signal(str, str, bool, str)
     def __init__(self, ffmpeg_mgr, default_output_dir: str = ""):
         super().__init__()
         self.ffmpeg_mgr = ffmpeg_mgr
         self.worker = None
         self.theme_colors = ThemeManager.instance().current_colors
         self._default_output_dir = (default_output_dir or "").strip()
+        self._current_task_filename = ""
+        self._module_name = "🎬 视频"
         self._setup_ui()
         self._apply_widget_styles()
         if self._default_output_dir and not self.output_path_edit.text().strip():
             self.output_path_edit.setText(self._default_output_dir)
-        try:
-            ThemeManager.instance().theme_changed.connect(self.reapply_theme)
-        except Exception:
-            pass
 
     def _setup_ui(self):
+        c = self.theme_colors
         # 设置全局布局约束
         self.setMinimumWidth(700)
         self.resize(1000, 700)
@@ -318,9 +319,9 @@ class VideoConverterWidget(QWidget):
 
         # === 标题区域 ===
         title_label = QLabel("🎬 视频格式转换")
-        title_label.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {COLORS['text']};")
+        title_label.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {self.theme_colors['text']};")
         subtitle_label = QLabel("支持 16 种视频格式互转，支持提取音频，支持视频转 GIF 动图")
-        subtitle_label.setStyleSheet(f"font-size: 13px; color: {COLORS['text_secondary']};")
+        subtitle_label.setStyleSheet(f"font-size: 13px; color: {self.theme_colors['text_secondary']};")
         
         title_layout = QVBoxLayout()
         title_layout.addWidget(title_label)
@@ -341,12 +342,12 @@ class VideoConverterWidget(QWidget):
         file_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 16px;
-                background-color: {COLORS['card']};
+                background-color: {self.theme_colors['card']};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -367,18 +368,18 @@ class VideoConverterWidget(QWidget):
         self.file_list.customContextMenuRequested.connect(self._show_file_context_menu)
         self.file_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['bg']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 6px;
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 padding: 4px;
             }}
             QListWidget::item {{
                 padding: 8px;
-                border-bottom: 1px solid {COLORS['border']};
+                border-bottom: 1px solid {self.theme_colors['border']};
             }}
             QListWidget::item:selected {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
                 color: white;
             }}
         """)
@@ -394,16 +395,16 @@ class VideoConverterWidget(QWidget):
         for btn in [self.add_btn, self.remove_btn, self.clear_btn]:
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background-color: {COLORS['card_hover']};
-                    color: {COLORS['text']};
-                    border: 1px solid {COLORS['border']};
+                    background-color: {self.theme_colors['card_hover']};
+                    color: {self.theme_colors['text']};
+                    border: 1px solid {self.theme_colors['border']};
                     border-radius: 4px;
                     padding: 8px 12px;
                 }}
                 QPushButton:hover {{
-                    background-color: {COLORS['primary']};
+                    background-color: {self.theme_colors['primary']};
                     color: white;
-                    border-color: {COLORS['primary']};
+                    border-color: {self.theme_colors['primary']};
                 }}
             """)
 
@@ -422,12 +423,12 @@ class VideoConverterWidget(QWidget):
         settings_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 16px;
-                background-color: {COLORS['card']};
+                background-color: {self.theme_colors['card']};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -442,25 +443,25 @@ class VideoConverterWidget(QWidget):
         # 通用控件样式
         input_style = f"""
             QComboBox, QLineEdit {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['bg']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 min-height: 24px;
             }}
             QComboBox:hover, QLineEdit:hover, QComboBox:focus, QLineEdit:focus {{
-                border: 1px solid {COLORS['primary']};
+                border: 1px solid {self.theme_colors['primary']};
             }}
             QComboBox::drop-down {{
                 border: none;
                 width: 24px;
             }}
             QComboBox QAbstractItemView {{
-                background-color: {COLORS['card']};
-                border: 1px solid {COLORS['border']};
-                selection-background-color: {COLORS['primary']};
-                color: {COLORS['text']};
+                background-color: {self.theme_colors['card']};
+                border: 1px solid {self.theme_colors['border']};
+                selection-background-color: {self.theme_colors['primary']};
+                color: {self.theme_colors['text']};
             }}
         """
 
@@ -475,7 +476,7 @@ class VideoConverterWidget(QWidget):
             label.setStyleSheet(
                 get_cjk_font_qss(
                     font_size_px=14,
-                    color=COLORS['text'],
+                    color=self.theme_colors['text'],
                     extra="font-weight: 400;"
                 )
             )
@@ -512,14 +513,14 @@ class VideoConverterWidget(QWidget):
         self.output_browse_btn.setFixedWidth(70)
         self.output_browse_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
                 color: white;
                 border: none;
                 border-radius: 4px;
                 padding: 6px;
             }}
             QPushButton:hover {{
-                background-color: {COLORS['primary_hover']};
+                background-color: {self.theme_colors['primary_hover']};
             }}
         """)
         self.output_browse_btn.clicked.connect(self._browse_output_dir)
@@ -527,7 +528,7 @@ class VideoConverterWidget(QWidget):
         output_layout = QHBoxLayout()
         output_layout.setSpacing(12)
         output_label = QLabel("输出目录")
-        output_label.setStyleSheet(f"color: {COLORS['text_secondary']}; font-size: 13px;")
+        output_label.setStyleSheet(f"color: {self.theme_colors['text_secondary']}; font-size: 13px;")
         output_label.setMinimumWidth(85)
         output_label.setSizePolicy(
             QSizePolicy.Policy.Fixed,
@@ -566,8 +567,8 @@ class VideoConverterWidget(QWidget):
                 p.drawLine(int(size * 0.22), int(size * 0.55), int(size * 0.44), int(size * 0.76))
                 p.drawLine(int(size * 0.40), int(size * 0.76), int(size * 0.80), int(size * 0.26))
             else:
-                p.setBrush(QBrush(QColor(COLORS['bg'])))
-                pen = QPen(QColor(COLORS['border']))
+                p.setBrush(QBrush(QColor(self.theme_colors['bg'])))
+                pen = QPen(QColor(self.theme_colors['border']))
                 pen.setWidth(2)
                 p.setPen(pen)
                 path = QPainterPath()
@@ -577,7 +578,7 @@ class VideoConverterWidget(QWidget):
             return pm
 
         self.extract_audio_check = QPushButton(
-            QIcon(_make_checkbox_icon_pixmap(False, COLORS['accent'])),
+            QIcon(_make_checkbox_icon_pixmap(False, self.theme_colors['accent'])),
             "  仅提取音频 (忽略视频画面)"
         )
         self.extract_audio_check.setCheckable(True)
@@ -585,7 +586,7 @@ class VideoConverterWidget(QWidget):
         self.extract_audio_check.setCursor(Qt.PointingHandCursor)
         self.extract_audio_check.setStyleSheet(f"""
             QPushButton {{
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 font-size: 14px;
                 font-weight: 500;
                 padding: 6px 12px 6px 10px;
@@ -595,18 +596,18 @@ class VideoConverterWidget(QWidget):
                 text-align: left;
             }}
             QPushButton:hover {{
-                background-color: rgba(233, 69, 96, 0.10);
+                background-color: {hex_with_alpha(c['accent'], 0.10)};
             }}
             QPushButton:checked {{
-                background-color: rgba(233, 69, 96, 0.18);
-                color: #ffffff;
+                background-color: {hex_with_alpha(c['accent'], 0.18)};
+                color: {c['text']};
                 font-weight: 600;
             }}
         """)
 
         def _on_extract_toggled_icon(checked: bool):
             self.extract_audio_check.setIcon(
-                QIcon(_make_checkbox_icon_pixmap(checked, COLORS['accent']))
+                QIcon(_make_checkbox_icon_pixmap(checked, self.theme_colors['accent']))
             )
         self.extract_audio_check.toggled.connect(_on_extract_toggled_icon)
         self.extract_audio_check.toggled.connect(self._toggle_extract_audio)
@@ -640,7 +641,7 @@ class VideoConverterWidget(QWidget):
         self.convert_btn.setMinimumHeight(46)
         self.convert_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS["success"]};
+                background-color: {self.theme_colors["success"]};
                 color: white;
                 font-weight: bold;
                 font-size: 15px;
@@ -662,7 +663,7 @@ class VideoConverterWidget(QWidget):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS["accent"]};
+                background-color: {self.theme_colors["accent"]};
                 color: white;
                 font-weight: bold;
                 font-size: 15px;
@@ -683,16 +684,16 @@ class VideoConverterWidget(QWidget):
         self.open_output_btn.setMinimumHeight(46)
         self.open_output_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS["card"]};
-                color: {COLORS["text"]};
+                background-color: {self.theme_colors["card"]};
+                color: {self.theme_colors["text"]};
                 font-weight: 500;
                 font-size: 13px;
                 border-radius: 8px;
-                border: 1px solid {COLORS["border"]};
+                border: 1px solid {self.theme_colors["border"]};
             }}
             QPushButton:hover {{
-                background-color: {COLORS["card_hover"]};
-                border-color: {COLORS["success"]};
+                background-color: {self.theme_colors["card_hover"]};
+                border-color: {self.theme_colors["success"]};
             }}
         """)
         self.open_output_btn.clicked.connect(self._open_output_dir)
@@ -852,6 +853,7 @@ class VideoConverterWidget(QWidget):
         self.worker.task_started_signal.connect(self._on_task_started)
         self.worker.task_finished_signal.connect(self._on_task_finished)
         self.worker.all_done_signal.connect(self._on_all_done)
+        self.worker.single_progress_signal.connect(self._on_single_progress)
         self.worker.start()
 
         output_format = self.format_combo.currentData()
@@ -871,25 +873,43 @@ class VideoConverterWidget(QWidget):
 
     @Slot(str)
     def _on_task_started(self, filename: str):
+        self._current_task_filename = filename
         self.task_monitor_signal.emit(filename)
         self.log_signal.emit("info", f"🎬 正在转换: {filename}")
+        self.task_progress_signal.emit(self._module_name, filename, 0)
+
+    @Slot(int)
+    def _on_single_progress(self, progress: int):
+        if self._current_task_filename:
+            self.task_progress_signal.emit(
+                self._module_name, self._current_task_filename, progress
+            )
 
     @Slot(object)
     def _on_task_finished(self, result):
         basename = os.path.basename(getattr(result.task, "input_path", ""))
+        full_path = getattr(result.task, "input_path", "")
+        filename = basename if basename else os.path.basename(full_path) or ""
         msg = (getattr(result, "message", "") or "").strip()
         first_line = msg.splitlines()[0] if msg else ""
         if len(first_line) > 120:
             first_line = first_line[:117] + "..."
-        if getattr(result, "success", False):
+        success = bool(getattr(result, "success", False))
+        if success:
             self.log_signal.emit("success", f"🎬 {basename} — {first_line or '转换成功'}")
         else:
             self.log_signal.emit("error", f"🎬 {basename} — {first_line or '转换失败'}")
+        self.task_result_signal.emit(self._module_name, filename, success, msg)
 
     @Slot()
     def _on_all_done(self):
+        if self._current_task_filename:
+            self.task_progress_signal.emit(
+                self._module_name, self._current_task_filename, 100
+            )
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self._current_task_filename = ""
         self.task_monitor_signal.emit("")
         self.log_signal.emit("info", "🎬 视频转换全部完成")
         QMessageBox.information(self, "完成", "所有转换任务已处理完毕！")

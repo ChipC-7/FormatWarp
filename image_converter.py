@@ -22,7 +22,7 @@ from PySide6.QtGui import (
     QDragEnterEvent, QDropEvent, QPixmap, QPainter, QColor, QPen, QBrush,
     QPainterPath, QIcon
 )
-from utils import COLORS, BaseConversionWorker, FFMPEG_MUXER_FORMAT_MAP, get_cjk_font_qss, ThemeManager
+from utils import BaseConversionWorker, FFMPEG_MUXER_FORMAT_MAP, get_cjk_font_qss, ThemeManager, hex_with_alpha
 
 SUPPORTED_IMAGE_FORMATS = {
     "png":  {"ext": ".png",  "desc": "PNG — 无损压缩 (透明通道支持)", "quality": False},
@@ -238,7 +238,8 @@ class ImageConversionResult:
     message: str
 
 
-def _make_checkbox_icon_pixmap(checked: bool, accent_hex: str, size=22, radius=5):
+def _make_checkbox_icon_pixmap(checked: bool, accent_hex: str, size=22, radius=5,
+                              bg_hex: str = "#1a1a2e", border_hex: str = "#0f3460"):
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -258,8 +259,8 @@ def _make_checkbox_icon_pixmap(checked: bool, accent_hex: str, size=22, radius=5
         p.drawLine(int(size * 0.22), int(size * 0.55), int(size * 0.44), int(size * 0.76))
         p.drawLine(int(size * 0.40), int(size * 0.76), int(size * 0.80), int(size * 0.26))
     else:
-        p.setBrush(QBrush(QColor(COLORS['bg'])))
-        pen = QPen(QColor(COLORS['border']))
+        p.setBrush(QBrush(QColor(bg_hex)))
+        pen = QPen(QColor(border_hex))
         pen.setWidth(2)
         p.setPen(pen)
         path = QPainterPath()
@@ -568,14 +569,16 @@ class PipInstallWorker(QThread):
 class ImageConverterWidget(QWidget):
     task_monitor_signal = Signal(str)
     log_signal = Signal(str, str)
-
+    task_progress_signal = Signal(str, str, int)
+    task_result_signal = Signal(str, str, bool, str)
     def __init__(self, ffmpeg_mgr, default_output_dir: str = ""):
         super().__init__()
         self.ffmpeg_mgr = ffmpeg_mgr
         self.worker = None
-        self.install_worker = None
         self.theme_colors = ThemeManager.instance().current_colors
         self._default_output_dir = (default_output_dir or "").strip()
+        self._current_task_filename = ""
+        self._module_name = "🖼️ 图片"
 
         self.pil_local_available = False
         try:
@@ -589,12 +592,9 @@ class ImageConverterWidget(QWidget):
         self._apply_widget_styles()
         if self._default_output_dir and not self.output_path_edit.text().strip():
             self.output_path_edit.setText(self._default_output_dir)
-        try:
-            ThemeManager.instance().theme_changed.connect(self.reapply_theme)
-        except Exception:
-            pass
 
     def _setup_ui(self):
+        c = self.theme_colors
         self.setMinimumWidth(700)
         self.resize(1000, 700)
 
@@ -603,9 +603,9 @@ class ImageConverterWidget(QWidget):
         layout.setSpacing(14)
 
         title_label = QLabel("🖼️  图片格式转换")
-        title_label.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {COLORS['text']};")
+        title_label.setStyleSheet(f"font-size: 22px; font-weight: bold; color: {self.theme_colors['text']};")
         subtitle_label = QLabel("支持 PNG / JPEG / WEBP / TIFF / AVIF / ICO 等主流格式批量互转 (Pillow + FFmpeg 双引擎)")
-        subtitle_label.setStyleSheet(f"font-size: 13px; color: {COLORS['text_secondary']};")
+        subtitle_label.setStyleSheet(f"font-size: 13px; color: {self.theme_colors['text_secondary']};")
 
         title_layout = QVBoxLayout()
         title_layout.addWidget(title_label)
@@ -622,12 +622,12 @@ class ImageConverterWidget(QWidget):
         file_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 16px;
-                background-color: {COLORS['card']};
+                background-color: {self.theme_colors['card']};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -647,18 +647,18 @@ class ImageConverterWidget(QWidget):
         self.file_list.customContextMenuRequested.connect(self._show_file_context_menu)
         self.file_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['bg']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 6px;
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 padding: 4px;
             }}
             QListWidget::item {{
                 padding: 8px;
-                border-bottom: 1px solid {COLORS['border']};
+                border-bottom: 1px solid {self.theme_colors['border']};
             }}
             QListWidget::item:selected {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
                 color: white;
             }}
         """)
@@ -673,16 +673,16 @@ class ImageConverterWidget(QWidget):
         for btn in [self.add_btn, self.remove_btn, self.clear_btn]:
             btn.setStyleSheet(f"""
                 QPushButton {{
-                    background-color: {COLORS['card_hover']};
-                    color: {COLORS['text']};
-                    border: 1px solid {COLORS['border']};
+                    background-color: {self.theme_colors['card_hover']};
+                    color: {self.theme_colors['text']};
+                    border: 1px solid {self.theme_colors['border']};
                     border-radius: 4px;
                     padding: 8px 12px;
                 }}
                 QPushButton:hover {{
-                    background-color: {COLORS['primary']};
+                    background-color: {self.theme_colors['primary']};
                     color: white;
-                    border-color: {COLORS['primary']};
+                    border-color: {self.theme_colors['primary']};
                 }}
             """)
         file_btn_layout.addWidget(self.add_btn)
@@ -699,12 +699,12 @@ class ImageConverterWidget(QWidget):
         settings_group.setStyleSheet(f"""
             QGroupBox {{
                 font-weight: bold;
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 4px;
-                background-color: {COLORS['card']};
+                background-color: {self.theme_colors['card']};
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin;
@@ -719,19 +719,19 @@ class ImageConverterWidget(QWidget):
 
         input_style = f"""
             QComboBox, QLineEdit, QSpinBox {{
-                background-color: {COLORS['bg']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['bg']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
                 font-size: 13px;
                 min-height: 22px;
             }}
             QComboBox:hover, QLineEdit:hover, QSpinBox:hover {{
-                border-color: {COLORS['primary']};
+                border-color: {self.theme_colors['primary']};
             }}
             QComboBox:focus, QLineEdit:focus, QSpinBox:focus {{
-                border-color: {COLORS['success']};
+                border-color: {self.theme_colors['success']};
             }}
             QComboBox::drop-down {{
                 border: none;
@@ -739,18 +739,18 @@ class ImageConverterWidget(QWidget):
             }}
             QSlider::groove:horizontal {{
                 height: 6px;
-                background: {COLORS['bg']};
+                background: {self.theme_colors['bg']};
                 border-radius: 3px;
             }}
             QSlider::sub-page:horizontal {{
-                background: {COLORS['accent']};
+                background: {self.theme_colors['accent']};
                 border-radius: 3px;
             }}
             QSlider::handle:horizontal {{
                 width: 16px;
                 margin: -6px 0;
                 border-radius: 8px;
-                background: {COLORS['accent']};
+                background: {self.theme_colors['accent']};
                 border: 2px solid #ffffff;
             }}
         """
@@ -769,7 +769,7 @@ class ImageConverterWidget(QWidget):
             lab.setStyleSheet(
                 get_cjk_font_qss(
                     font_size_px=14,
-                    color=COLORS['text'],
+                    color=self.theme_colors['text'],
                     extra="font-weight: 400; padding: 0; background: transparent;"
                 )
             )
@@ -799,16 +799,16 @@ class ImageConverterWidget(QWidget):
         self.output_browse_btn = QPushButton("📂 浏览")
         self.output_browse_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS['card_hover']};
-                color: {COLORS['text']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['card_hover']};
+                color: {self.theme_colors['text']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
             }}
             QPushButton:hover {{
-                background-color: {COLORS['primary']};
+                background-color: {self.theme_colors['primary']};
                 color: white;
-                border-color: {COLORS['primary']};
+                border-color: {self.theme_colors['primary']};
             }}
         """)
         self.output_browse_btn.clicked.connect(self._browse_output_dir)
@@ -837,7 +837,9 @@ class ImageConverterWidget(QWidget):
 
         # 「保留 EXIF」按钮整体右移（对齐到下拉框的位置 = 96 标签宽 + 12 间距 = 108px）
         self.keep_exif_check = QPushButton(
-            QIcon(_make_checkbox_icon_pixmap(False, COLORS['accent'])),
+            QIcon(_make_checkbox_icon_pixmap(False, self.theme_colors['accent'],
+                                             bg_hex=self.theme_colors['bg'],
+                                             border_hex=self.theme_colors['border'])),
             "  保留 EXIF 元数据"
         )
         self.keep_exif_check.setCheckable(True)
@@ -847,7 +849,7 @@ class ImageConverterWidget(QWidget):
         self.keep_exif_check.setMinimumHeight(38)
         self.keep_exif_check.setStyleSheet(f"""
             QPushButton {{
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 font-size: 14px;
                 font-weight: 500;
                 padding: 6px 12px 6px 10px;
@@ -857,16 +859,19 @@ class ImageConverterWidget(QWidget):
                 text-align: left;
             }}
             QPushButton:hover {{
-                background-color: rgba(233, 69, 96, 0.10);
+                background-color: {hex_with_alpha(c['accent'], 0.10)};
             }}
             QPushButton:checked {{
-                background-color: rgba(233, 69, 96, 0.18);
-                color: #ffffff;
+                background-color: {hex_with_alpha(c['accent'], 0.18)};
+                color: {c['text']};
                 font-weight: 600;
             }}
         """)
         def _on_exif_toggled(c):
-            self.keep_exif_check.setIcon(QIcon(_make_checkbox_icon_pixmap(c, COLORS['accent'])))
+            self.keep_exif_check.setIcon(QIcon(_make_checkbox_icon_pixmap(
+                c, self.theme_colors['accent'],
+                bg_hex=self.theme_colors['bg'],
+                border_hex=self.theme_colors['border'])))
         self.keep_exif_check.toggled.connect(_on_exif_toggled)
         cb_layout = QHBoxLayout()
         cb_layout.addSpacing(108)
@@ -875,7 +880,9 @@ class ImageConverterWidget(QWidget):
         settings_layout.addLayout(cb_layout)
 
         self.overwrite_check = QPushButton(
-            QIcon(_make_checkbox_icon_pixmap(False, COLORS['accent'])),
+            QIcon(_make_checkbox_icon_pixmap(False, self.theme_colors['accent'],
+                                             bg_hex=self.theme_colors['bg'],
+                                             border_hex=self.theme_colors['border'])),
             "  重名文件 — 直接覆盖 (否则自动重命名)"
         )
         self.overwrite_check.setCheckable(True)
@@ -885,7 +892,10 @@ class ImageConverterWidget(QWidget):
         self.overwrite_check.setMinimumHeight(38)
         self.overwrite_check.setStyleSheet(self.keep_exif_check.styleSheet())
         def _on_over_toggled(c):
-            self.overwrite_check.setIcon(QIcon(_make_checkbox_icon_pixmap(c, COLORS['accent'])))
+            self.overwrite_check.setIcon(QIcon(_make_checkbox_icon_pixmap(
+                c, self.theme_colors['accent'],
+                bg_hex=self.theme_colors['bg'],
+                border_hex=self.theme_colors['border'])))
         self.overwrite_check.toggled.connect(_on_over_toggled)
         cb2 = QHBoxLayout()
         cb2.addSpacing(108)
@@ -904,7 +914,7 @@ class ImageConverterWidget(QWidget):
         self.convert_btn.setMinimumHeight(46)
         self.convert_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS["success"]};
+                background-color: {self.theme_colors["success"]};
                 color: white;
                 font-weight: bold;
                 font-size: 15px;
@@ -926,7 +936,7 @@ class ImageConverterWidget(QWidget):
         self.stop_btn.setEnabled(False)
         self.stop_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS["accent"]};
+                background-color: {self.theme_colors["accent"]};
                 color: white;
                 font-weight: bold;
                 font-size: 15px;
@@ -947,16 +957,16 @@ class ImageConverterWidget(QWidget):
         self.open_output_btn.setMinimumHeight(46)
         self.open_output_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: {COLORS["card"]};
-                color: {COLORS["text"]};
+                background-color: {self.theme_colors["card"]};
+                color: {self.theme_colors["text"]};
                 font-weight: 500;
                 font-size: 13px;
                 border-radius: 8px;
-                border: 1px solid {COLORS["border"]};
+                border: 1px solid {self.theme_colors["border"]};
             }}
             QPushButton:hover {{
-                background-color: {COLORS["card_hover"]};
-                border-color: {COLORS["success"]};
+                background-color: {self.theme_colors["card_hover"]};
+                border-color: {self.theme_colors["success"]};
             }}
         """)
         self.open_output_btn.clicked.connect(self._open_output_dir)
@@ -1175,6 +1185,7 @@ class ImageConverterWidget(QWidget):
         self.worker.task_started_signal.connect(self._on_task_started)
         self.worker.task_finished_signal.connect(self._on_task_finished)
         self.worker.all_done_signal.connect(self._on_all_done)
+        self.worker.single_progress_signal.connect(self._on_single_progress)
         self.worker.start()
 
         output_format = self.format_combo.currentData()
@@ -1193,23 +1204,41 @@ class ImageConverterWidget(QWidget):
         pass
 
     def _on_task_started(self, name):
+        self._current_task_filename = name
         self.task_monitor_signal.emit(name)
         self.log_signal.emit("info", f"🖼️ 正在转换: {name}")
+        self.task_progress_signal.emit(self._module_name, name, 0)
+
+    @Slot(int)
+    def _on_single_progress(self, progress: int):
+        if self._current_task_filename:
+            self.task_progress_signal.emit(
+                self._module_name, self._current_task_filename, progress
+            )
 
     def _on_task_finished(self, result: ImageConversionResult):
         basename = os.path.basename(getattr(result.task, "input_path", ""))
+        full_path = getattr(result.task, "input_path", "")
+        filename = basename if basename else os.path.basename(full_path) or ""
         msg = (getattr(result, "message", "") or "").strip()
         first_line = msg.splitlines()[0] if msg else ""
         if len(first_line) > 120:
             first_line = first_line[:117] + "..."
-        if getattr(result, "success", False):
+        success = bool(getattr(result, "success", False))
+        if success:
             self.log_signal.emit("success", f"🖼️ {basename} — {first_line or '转换成功'}")
         else:
             self.log_signal.emit("error", f"🖼️ {basename} — {first_line or '转换失败'}")
+        self.task_result_signal.emit(self._module_name, filename, success, msg)
 
     def _on_all_done(self):
+        if self._current_task_filename:
+            self.task_progress_signal.emit(
+                self._module_name, self._current_task_filename, 100
+            )
         self.convert_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self._current_task_filename = ""
         self.task_monitor_signal.emit("")
         self.log_signal.emit("info", "🖼️ 图片转换全部完成")
 

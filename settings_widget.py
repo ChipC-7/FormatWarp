@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
 )
 
 from utils import (
-    COLORS, ThemeManager, get_cjk_font_qss, APP_NAME, ORG_NAME,
+    ThemeManager, get_cjk_font_qss, APP_NAME, ORG_NAME,
 )
 
 

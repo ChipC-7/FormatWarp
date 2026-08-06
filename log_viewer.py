@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QPushButton, QGroupBox,
 )
 
-from utils import COLORS, ThemeManager
+from utils import ThemeManager
 
 
 # 日志级别 -> 主题颜色键 / 图标
@@ -41,10 +41,6 @@ class LogViewerWidget(QWidget):
         self.ffmpeg_mgr = ffmpeg_mgr
         self._setup_ui()
         self._apply_widget_styles()
-        try:
-            ThemeManager.instance().theme_changed.connect(self.reapply_theme)
-        except Exception:
-            pass
 
     # ==================== UI ====================
 
@@ -59,11 +55,11 @@ class LogViewerWidget(QWidget):
         # === 标题 ===
         self.title_label = QLabel("📋 运行日志")
         self.title_label.setStyleSheet(
-            f"font-size: 22px; font-weight: bold; color: {COLORS['text']};"
+            f"font-size: 22px; font-weight: bold; color: {self.theme_colors['text']};"
         )
         self.subtitle_label = QLabel("实时显示各模块转换事件与 FFmpeg 引擎状态")
         self.subtitle_label.setStyleSheet(
-            f"font-size: 13px; color: {COLORS['text_secondary']};"
+            f"font-size: 13px; color: {self.theme_colors['text_secondary']};"
         )
         layout.addWidget(self.title_label)
         layout.addWidget(self.subtitle_label)
@@ -79,7 +75,7 @@ class LogViewerWidget(QWidget):
         self.engine_status_label.setTextFormat(Qt.TextFormat.PlainText)
         self.engine_status_label.setStyleSheet(
             "font-family: 'JetBrains Mono', 'Consolas', monospace;"
-            " font-size: 12px; color: " + COLORS["text"] + ";"
+            " font-size: 12px; color: " + self.theme_colors["text"] + ";"
         )
         eng_layout.addWidget(self.engine_status_label)
 
@@ -90,7 +86,7 @@ class LogViewerWidget(QWidget):
         header_layout.setContentsMargins(0, 0, 0, 0)
         log_title = QLabel("事件日志")
         log_title.setStyleSheet(
-            f"font-size: 14px; font-weight: 600; color: {COLORS['text']};"
+            f"font-size: 14px; font-weight: 600; color: {self.theme_colors['text']};"
         )
         header_layout.addWidget(log_title)
         header_layout.addStretch()
@@ -106,17 +102,17 @@ class LogViewerWidget(QWidget):
         self.log_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.log_list.setStyleSheet(f"""
             QListWidget {{
-                background-color: {COLORS['bg']};
-                border: 1px solid {COLORS['border']};
+                background-color: {self.theme_colors['bg']};
+                border: 1px solid {self.theme_colors['border']};
                 border-radius: 8px;
                 padding: 8px;
                 outline: none;
             }}
             QListWidget::item {{
                 background-color: transparent;
-                border-bottom: 1px solid {COLORS['border']};
+                border-bottom: 1px solid {self.theme_colors['border']};
                 padding: 6px 8px;
-                color: {COLORS['text']};
+                color: {self.theme_colors['text']};
                 font-family: 'JetBrains Mono', 'Consolas', monospace;
                 font-size: 12px;
             }}
@@ -128,7 +124,7 @@ class LogViewerWidget(QWidget):
             f"最多保留最近 {MAX_LOG_ITEMS} 条日志；新事件将出现在顶部。"
         )
         hint_label.setStyleSheet(
-            f"color: {COLORS['text_secondary']}; font-size: 12px; padding: 4px 0;"
+            f"color: {self.theme_colors['text_secondary']}; font-size: 12px; padding: 4px 0;"
         )
         layout.addWidget(hint_label)
 
@@ -144,6 +140,7 @@ class LogViewerWidget(QWidget):
         text = f"[{ts}] {LEVEL_ICONS[level]} {message}"
 
         item = QListWidgetItem(text)
+        item.setData(Qt.ItemDataRole.UserRole, level)
         color_key = LEVEL_COLOR_KEYS[level]
         color_hex = self.theme_colors.get(color_key, self.theme_colors.get("text"))
         item.setForeground(QColor(color_hex))
@@ -196,18 +193,11 @@ class LogViewerWidget(QWidget):
     def reapply_theme(self, colors: dict):
         self.theme_colors = colors
         self._apply_widget_styles()
-        # 重新着色已有日志条目
+        # 重新着色已有日志条目（使用 UserRole 存储的级别，避免遍历文本）
         for i in range(self.log_list.count()):
             item = self.log_list.item(i)
-            text = item.text() or ""
-            level = "info"
-            if "✅" in text:
-                level = "success"
-            elif "⚠️" in text:
-                level = "warning"
-            elif "❌" in text:
-                level = "error"
-            color_key = LEVEL_COLOR_KEYS[level]
+            level = item.data(Qt.ItemDataRole.UserRole) or "info"
+            color_key = LEVEL_COLOR_KEYS.get(level, "text")
             item.setForeground(
                 QColor(self.theme_colors.get(color_key, self.theme_colors.get("text")))
             )
