@@ -16,7 +16,6 @@
 - 🚀 **批量处理**：支持多线程/多任务队列，大幅提升转换效率。
 
 ## 📸 软件截图
-![软件主界面](images/screenshot1.png "FormatWarp 主界面")
 ![软件图标](images/screenshot2.png )
 ## 🚀 快速开始
 
