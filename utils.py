@@ -397,6 +397,30 @@ class FFmpegManager:
         if self.ffmpeg_path and not self.supported_muxers:
             self._probe_supported_muxers()
 
+    # ===== GPU 硬件加速检测 =====
+
+    # 硬件编码器定义：key -> (编码器列表, 显示名)
+    GPU_ENCODER_MAP: dict = {
+        "nvenc": (["h264_nvenc", "hevc_nvenc", "av1_nvenc"], "NVIDIA NVENC"),
+        "qsv":   (["h264_qsv", "hevc_qsv", "av1_qsv"],     "Intel QSV"),
+        "amf":   (["h264_amf", "hevc_amf"],                 "AMD AMF"),
+        "vtb":   (["h264_videotoolbox", "hevc_videotoolbox"], "Apple VideoToolbox"),
+    }
+
+    def detect_gpu_encoders(self) -> dict:
+        """检测当前 FFmpeg 支持的硬件编码器。
+        返回: {"nvenc": "NVIDIA NVENC", ...}  仅包含可用的加速方案。
+        """
+        if not self.supported_encoders:
+            return {}
+        available = {}
+        for key, (encoders, display_name) in self.GPU_ENCODER_MAP.items():
+            for enc in encoders:
+                if enc in self.supported_encoders:
+                    available[key] = display_name
+                    break
+        return available
+
 # ============ 数据类 ============
 @dataclass
 class ConversionTask:

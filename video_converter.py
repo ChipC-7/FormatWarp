@@ -79,13 +79,14 @@ INPUT_VIDEO_FORMATS = [
 ]
 
 class VideoConversionTask:
-    def __init__(self, input_path, output_path, output_format, video_bitrate=None, audio_bitrate=None, extract_audio=False):
+    def __init__(self, input_path, output_path, output_format, video_bitrate=None, audio_bitrate=None, extract_audio=False, hardware_accel=None):
         self.input_path = input_path
         self.output_path = output_path
         self.output_format = output_format
         self.video_bitrate = video_bitrate
         self.audio_bitrate = audio_bitrate
         self.extract_audio = extract_audio
+        self.hardware_accel = hardware_accel  # None=自动, "cpu"=CPU, "nvenc"/"qsv"/"amf"/"vtb"=硬件加速
 
 class VideoConversionResult:
     def __init__(self, success, task, message):
@@ -109,7 +110,17 @@ class VideoConversionWorker(BaseConversionWorker):
             elif stream_copy:
                 cmd.extend(["-c", "copy", "-map", "0"])
             else:
-                if task.video_bitrate:
+                # ===== GPU 硬件加速 =====
+                hw = task.hardware_accel
+                gpu_encoder = self._resolve_gpu_encoder(hw)
+                if gpu_encoder:
+                    cmd.extend(["-c:v", gpu_encoder])
+                    if task.video_bitrate:
+                        cmd.extend(["-b:v", task.video_bitrate])
+                    else:
+                        cmd.extend(["-cq", "23"])
+                    cmd.extend(["-preset", "p4", "-rc", "vbr"])
+                elif task.video_bitrate:
                     cmd.extend(["-b:v", task.video_bitrate])
                 else:
                     if task.output_format in ["mp4", "mkv", "mov"]:
@@ -117,6 +128,17 @@ class VideoConversionWorker(BaseConversionWorker):
                     elif task.output_format == "webm":
                         cmd.extend(["-crf", "30", "-b:v", "0"])
         return cmd, alias_table
+
+    @staticmethod
+    def _resolve_gpu_encoder(hw_key: str) -> str:
+        """将 hardware_accel key 映射为 FFmpeg 编码器名。"""
+        mapping = {
+            "nvenc": "h264_nvenc",
+            "qsv":   "h264_qsv",
+            "amf":   "h264_amf",
+            "vtb":   "h264_videotoolbox",
+        }
+        return mapping.get(hw_key, "")
 
     def _can_stream_copy(self, task: VideoConversionTask) -> bool:
         if task.extract_audio:
@@ -194,6 +216,33 @@ class VideoConversionWorker(BaseConversionWorker):
             f"   3) 或改用 MP4/MKV 等常见格式（精简版一般保留这些格式的编码器）"
         )
 
+    # GPU 错误关键词：匹配硬件编码器初始化失败、设备不可用等
+    GPU_ERROR_PATTERNS = [
+        "No capable devices found",
+        "InitializeEncoder failed",
+        "Cannot load nvcuda",
+        "dll.*not found",
+        "AMF",
+        "Error initializing an encoder",
+        "encoder.*not found",
+        "Invalid data found when processing the input",
+        "hw_device_ctx",
+        "No device available",
+        "failed to create encoder",
+        "Cannot load",
+    ]
+
+    @classmethod
+    def _is_gpu_failure(cls, stderr_text: str) -> bool:
+        """判断 stderr 是否包含 GPU 编码失败的特征。"""
+        if not stderr_text:
+            return False
+        import re
+        for pattern in cls.GPU_ERROR_PATTERNS:
+            if re.search(pattern, stderr_text, re.IGNORECASE):
+                return True
+        return False
+
     def _convert_single(self, task: VideoConversionTask) -> VideoConversionResult:
         try:
             unsupported_hint = self._check_muxer_unsupported(task.output_format)
@@ -205,13 +254,35 @@ class VideoConversionWorker(BaseConversionWorker):
 
             attempts = []
             if self._can_stream_copy(task):
-                attempts.append(("stream_copy", True))
-            attempts.append(("encode", False))
+                attempts.append(("stream_copy", True, None))
+            # GPU 编码尝试
+            if task.hardware_accel and task.hardware_accel not in ("cpu",):
+                attempts.append(("encode_gpu", False, task.hardware_accel))
+            # CPU 编码兜底
+            attempts.append(("encode_cpu", False, None))
 
             last_error = None
             last_tail = None
-            for mode_name, stream_copy in attempts:
-                base_cmd, alias_table = self._build_cmd(task, stream_copy)
+            gpu_failed = False
+            gpu_fallback_note = ""
+
+            for mode_name, stream_copy, hw_override in attempts:
+                # GPU 失败后回退：覆盖为 CPU
+                effective_task = task
+                if hw_override is None and gpu_failed:
+                    effective_task = VideoConversionTask(
+                        task.input_path, task.output_path, task.output_format,
+                        task.video_bitrate, task.audio_bitrate, task.extract_audio,
+                        hardware_accel=None
+                    )
+                elif hw_override is not None:
+                    effective_task = VideoConversionTask(
+                        task.input_path, task.output_path, task.output_format,
+                        task.video_bitrate, task.audio_bitrate, task.extract_audio,
+                        hardware_accel=hw_override
+                    )
+
+                base_cmd, alias_table = self._build_cmd(effective_task, stream_copy)
 
                 real_ext = alias_table.get(task.output_format)
                 final_output_path = task.output_path
@@ -253,15 +324,25 @@ class VideoConversionWorker(BaseConversionWorker):
                         return VideoConversionResult(
                             True, task, "转换成功（-c copy 流直拷，无损且快速）"
                         )
-                    return VideoConversionResult(True, task, "转换成功")
+                    msg = "转换成功"
+                    if gpu_failed:
+                        msg += "（硬件加速失败，已自动降级为 CPU 编码）"
+                    return VideoConversionResult(True, task, msg)
                 else:
                     last_error = status
                     last_tail = stderr_tail
+                    # 检测 GPU 失败，标记以便下次回退
+                    if mode_name == "encode_gpu" and self._is_gpu_failure("\n".join(stderr_tail)):
+                        gpu_failed = True
+                        continue
+                    # 非 GPU 失败或已回退过，不再重试
+                    if gpu_failed and mode_name == "encode_cpu":
+                        break
 
             tail_msg = "\n".join(last_tail).strip() or "(无详细输出)"
             base_err = (
                 f"FFmpeg 错误 (代码: {last_error})\n"
-                f"(已尝试 {len(attempts)} 种策略：{', '.join(m for m, _ in attempts)})\n"
+                f"(已尝试 {len(attempts)} 种策略：{', '.join(m for m, _, _ in attempts)})\n"
                 f"--- stderr 末尾 ---\n{tail_msg}"
             )
             full_err = self._enrich_muxer_error_from_stderr(
@@ -271,6 +352,8 @@ class VideoConversionWorker(BaseConversionWorker):
                 "\n".join(last_tail), task.output_format
             )
             full_err += enc_hint
+            if gpu_failed:
+                full_err += "\n\n⚠️ 硬件加速编码失败，已自动降级为 CPU 编码，但 CPU 编码也失败了。"
             return VideoConversionResult(False, task, full_err)
         except Exception as e:
             return VideoConversionResult(False, task, str(e))
@@ -546,6 +629,28 @@ class VideoConverterWidget(QWidget):
             self.v_bitrate_combo.addItem(name, value)
         settings_layout.addLayout(create_setting_row("视频码率", self.v_bitrate_combo))
 
+        # 硬件加速开关 + 下拉框
+        self.hwaccel_check = QCheckBox("启用硬件加速 (GPU)")
+        self.hwaccel_check.setChecked(True)
+        self.hwaccel_check.setCursor(Qt.PointingHandCursor)
+        self.hwaccel_check.toggled.connect(self._on_hwaccel_toggled)
+        settings_layout.addLayout(create_setting_row("", self.hwaccel_check))
+
+        self.hwaccel_combo = QComboBox()
+        self.hwaccel_combo.setStyleSheet(input_style)
+        settings_layout.addLayout(create_setting_row("选择加速引擎", self.hwaccel_combo))
+
+        # GPU 提示标签
+        self.hwaccel_hint = QLabel("")
+        self.hwaccel_hint.setStyleSheet(
+            f"color: {self.theme_colors['text_secondary']}; font-size: 11px; padding: 0 0 4px 0;"
+        )
+        self.hwaccel_hint.setWordWrap(True)
+        settings_layout.addWidget(self.hwaccel_hint)
+
+        # 创建完 hwaccel_hint 后再填充下拉框（_populate_hwaccel_combo 会更新提示）
+        self._populate_hwaccel_combo()
+
         # 提取音频选项
         def _make_checkbox_icon_pixmap(checked: bool, accent_hex: str, size=22, radius=5):
             pm = QPixmap(size, size)
@@ -611,6 +716,7 @@ class VideoConverterWidget(QWidget):
             )
         self.extract_audio_check.toggled.connect(_on_extract_toggled_icon)
         self.extract_audio_check.toggled.connect(self._toggle_extract_audio)
+        self.hwaccel_combo.currentIndexChanged.connect(lambda _: self._update_hwaccel_hint())
         
         checkbox_layout = QHBoxLayout()
         checkbox_layout.addSpacing(97)
@@ -705,9 +811,57 @@ class VideoConverterWidget(QWidget):
         layout.addLayout(action_layout)
 
     # === 事件处理 ===
+
+    def _populate_hwaccel_combo(self):
+        """根据 FFmpeg 检测到的硬件编码器填充下拉框。"""
+        self.hwaccel_combo.blockSignals(True)
+        self.hwaccel_combo.clear()
+        if not self.hwaccel_check.isChecked():
+            # 未启用 GPU 加速时，只显示 CPU 选项
+            self.hwaccel_combo.addItem("CPU 软件编码", "cpu")
+            self.hwaccel_combo.setEnabled(False)
+        else:
+            self.hwaccel_combo.addItem("自动选择 (推荐)", None)
+            self.hwaccel_combo.addItem("CPU 软件编码", "cpu")
+            if self.ffmpeg_mgr and self.ffmpeg_mgr.available:
+                gpu_encs = self.ffmpeg_mgr.detect_gpu_encoders()
+                for key, display_name in gpu_encs.items():
+                    self.hwaccel_combo.addItem(f"{display_name} (已就绪)", key)
+            self.hwaccel_combo.setEnabled(True)
+        self.hwaccel_combo.blockSignals(False)
+        self._update_hwaccel_hint()
+
+    def _on_hwaccel_toggled(self, checked: bool):
+        """GPU 加速开关切换。"""
+        self._populate_hwaccel_combo()
+
+    def _update_hwaccel_hint(self):
+        """根据当前选择更新 GPU 提示文案。"""
+        if not self.hwaccel_check.isChecked():
+            self.hwaccel_hint.setText("硬件加速已关闭，将使用 CPU 软件编码")
+            return
+        data = self.hwaccel_combo.currentData()
+        if data is None:
+            gpu_encs = self.ffmpeg_mgr.detect_gpu_encoders() if self.ffmpeg_mgr and self.ffmpeg_mgr.available else {}
+            if gpu_encs:
+                self.hwaccel_hint.setText(f"💡 检测到 {', '.join(gpu_encs.values())} 硬件，已自动开启加速；转换失败将自动降级为 CPU 编码")
+            else:
+                self.hwaccel_hint.setText("💡 未检测到可用硬件编码器，将使用 CPU 软件编码")
+        elif data == "cpu":
+            self.hwaccel_hint.setText("使用 CPU 软件编码，兼容性最好但速度较慢")
+        else:
+            self.hwaccel_hint.setText("💡 硬件加速模式下转换速度可提升 5-20 倍；如转换失败将自动降级为 CPU 编码")
+
     def _toggle_extract_audio(self, checked):
         self.a_bitrate_widget.setVisible(checked)
         self.v_bitrate_combo.setEnabled(not checked)
+        # 提取音频时禁用 GPU 选项
+        self.hwaccel_check.setEnabled(not checked)
+        self.hwaccel_combo.setEnabled(not checked and self.hwaccel_check.isChecked())
+        if checked:
+            self.hwaccel_hint.setText("提取音频时无需视频编码，硬件加速已自动禁用")
+        else:
+            self._update_hwaccel_hint()
         self.format_combo.blockSignals(True)
         self.format_combo.clear()
         if checked:
@@ -790,6 +944,9 @@ class VideoConverterWidget(QWidget):
         video_bitrate = self.v_bitrate_combo.currentData()
         extract_audio = self.extract_audio_check.isChecked()
         audio_bitrate = self.a_bitrate_combo.currentData() if extract_audio else None
+        hardware_accel = None
+        if not extract_audio and self.hwaccel_check.isChecked():
+            hardware_accel = self.hwaccel_combo.currentData()
 
         if extract_audio:
             ext = EXTRACT_AUDIO_FORMATS[output_format]["ext"]
@@ -826,7 +983,8 @@ class VideoConverterWidget(QWidget):
                 output_format=output_format,
                 video_bitrate=video_bitrate,
                 audio_bitrate=audio_bitrate,
-                extract_audio=extract_audio
+                extract_audio=extract_audio,
+                hardware_accel=hardware_accel
             ))
         return tasks
 
@@ -1065,7 +1223,8 @@ class VideoConverterWidget(QWidget):
             }}
         """
         for w in (self.format_combo, self.v_bitrate_combo,
-                  self.a_bitrate_combo, self.output_path_edit):
+                  self.a_bitrate_combo, self.output_path_edit,
+                  self.hwaccel_combo):
             try:
                 w.setStyleSheet(input_style)
             except Exception:
@@ -1105,6 +1264,33 @@ class VideoConverterWidget(QWidget):
             color: {c['text']};
             font-weight: 600;
         }}
+        """)
+
+        # --- GPU 提示标签 ---
+        self.hwaccel_hint.setStyleSheet(
+            f"color: {c['text_secondary']}; font-size: 11px; padding: 0 0 4px 0;"
+        )
+
+        # --- 硬件加速复选框 ---
+        self.hwaccel_check.setStyleSheet(f"""
+            QCheckBox {{
+                color: {c['text']};
+                font-size: 14px;
+                font-weight: 500;
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 20px;
+                height: 20px;
+                border-radius: 4px;
+                border: 2px solid {c['border']};
+                background-color: {c['card']};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {c['accent']};
+                border-color: {c['accent']};
+                image: none;
+            }}
         """)
 
         # --- 底部三大操作按钮 ---
