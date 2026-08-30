@@ -1,0 +1,25 @@
+# ============================================================
+# FormatWarp 后端（FastAPI + PyAV）依赖清单
+# 安装：pip install -r backend/requirements.txt
+# ============================================================
+# 说明：backend 作为 Tauri 2 的 sidecar 分发。
+#       引擎层（backend/engines/*）零 Qt / 零 FastAPI，可独立单测。
+
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+
+# 转换引擎核心（音频/视频，进程内 FFmpeg）
+av>=18.1
+
+# 图片引擎
+pillow>=11.0
+pillow-heif>=0.10
+pillow-avif-plugin>=0.3
+
+# 监控页暂停功能 Windows 降级
+psutil>=5.9
+
+# 文档引擎（可选，缺失时自动降级）
+# PyMuPDF pypdf python-docx docx2txt openpyxl
+# python-pptx pdf2docx striprtf markdown weasyprint pypandoc

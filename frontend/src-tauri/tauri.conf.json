@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FormatWarp",
+  "mainBinaryName": "formatwarp",
+  "version": "3.0.0",
+  "identifier": "com.formatwarp.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build && bash ../backend/build_sidecar.sh",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "FormatWarp - 格式跃迁",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 1100,
+        "minHeight": 750
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb"],
+    "shortDescription": "FormatWarp (格式跃迁) - universal format converter",
+    "longDescription": "FormatWarp (格式跃迁) is a cross-platform format conversion desktop app built with Tauri and FastAPI.\nFeatures:\n * Video, audio, image and document format conversion\n * Hardware-accelerated transcoding\n * Audio extraction and bitrate control",
+    "externalBin": ["binaries/formatwarp-backend"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "desktopTemplate": "desktop-template.hbs"
+      }
+    }
+  }
+}

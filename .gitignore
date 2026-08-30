@@ -1,0 +1,43 @@
+# ============ Node / 前端 ============
+node_modules/
+dist/
+*.local
+
+# ============ Tauri / Rust ============
+src-tauri/target/
+src-tauri/gen/schemas/
+src-tauri/binaries/
+
+# ============ Python / 后端 ============
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+build/
+dist/
+*.spec
+
+# ============ 打包产物 ============
+*.deb
+*.rpm
+*.AppImage
+*.exe
+*.msi
+*.dmg
+
+# ============ IDE / 编辑器 ============
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ============ 操作系统 ============
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ============ 日志与环境 ============
+*.log
+.env
+.env.*

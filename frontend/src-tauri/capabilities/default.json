@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口能力：核心 + 打开器 + 对话框 + 文件信息 + shell（sidecar 后端启动）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "dialog:default",
+    {
+      "identifier": "fs:allow-stat",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "fs:allow-read-dir",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        { "name": "binaries/formatwarp-backend", "sidecar": true },
+        { "name": "python3", "sidecar": false }
+      ]
+    },
+    "shell:allow-kill"
+  ]
+}
