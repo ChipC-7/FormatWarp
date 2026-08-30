@@ -112,18 +112,6 @@ npx tauri build
 产物：src-tauri/target/release/bundle/nsis/*-setup.exe（Windows）
 或 bundle/deb/*.deb（Linux）
 
-## 项目结构
-
-FormatWarp_v3/
-├── backend/ # Python 后端（FastAPI + PyAV/Pillow 引擎）
-│ ├── sidecar_entry.py # sidecar 入口（绝对导入）
-│ ├── app.py # FastAPI 应用
-│ ├── engines/ # 各格式转换引擎
-│ └── build_sidecar.sh # sidecar 打包脚本
-└── frontend/ # Tauri 桌面应用
-├── src/ # Vue 3 界面
-└── src-tauri/ # Tauri 配置与 Rust 壳
-
 
 ## 许可证
 
