@@ -45,10 +45,59 @@ fn kill_pid(pid: i32) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
+        // 递归杀掉整个后代进程树：sidecar 是"bootloader → 应用 → 转换进程"
+        // 多层结构，只杀 pid 本身会让应用子进程变孤儿并继续占用端口。
+        kill_process_tree(pid);
     }
+}
+
+/// 递归杀掉 pid 及其所有后代（Linux/macOS，通过 /proc 或 pgrep 实现）。
+#[cfg(not(target_os = "windows"))]
+fn child_pids(ppid: i32) -> Vec<i32> {
+    let mut out = Vec::new();
+    // 优先用 /proc（Linux）
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let Some(cpid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+                continue;
+            };
+            if cpid == ppid {
+                continue;
+            }
+            if let Ok(st) = std::fs::read_to_string(format!("/proc/{cpid}/stat")) {
+                // comm 可能含空格/括号，取最后一个 ')' 之后的字段
+                let Some(idx) = st.rfind(')') else { continue };
+                let fields: Vec<&str> = st[idx + 1..].split_whitespace().collect();
+                // ')' 后第 1 个字段是 state，第 2 个是 ppid
+                if fields.len() >= 2 && fields[1].parse::<i32>() == Ok(ppid) {
+                    out.push(cpid);
+                }
+            }
+        }
+    } else if let Ok(out_text) = std::process::Command::new("pgrep")
+        .args(["-P", &ppid.to_string()])
+        .output()
+    {
+        // macOS 兜底：pgrep -P
+        out.extend(
+            String::from_utf8_lossy(&out_text.stdout)
+                .split_whitespace()
+                .filter_map(|s| s.parse::<i32>().ok()),
+        );
+    }
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn kill_process_tree(pid: i32) {
+    // 先递归杀后代，再杀自身
+    for c in child_pids(pid) {
+        kill_process_tree(c);
+    }
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .status();
 }
 
 /// 清理上次残留的后端进程（pid 文件兜底）
@@ -106,7 +155,10 @@ fn spawn_backend(app: &tauri::App, port: Arc<Mutex<u16>>) -> Option<CommandChild
                         Ok(CommandEvent::Stderr(line)) => {
                             eprintln!("[dev-backend] {}", String::from_utf8_lossy(&line).trim_end());
                         }
-                        Ok(CommandEvent::Terminated(_)) | Err(_) => break,
+                        // 只有进程真正终止才退出；通道暂时为空(Empty)时
+                        // try_recv 会返回 Err，若此时退出会丢失随后到达的输出
+                        Ok(CommandEvent::Terminated(_)) => break,
+                        Err(_) => {}
                         Ok(_) => {}
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
@@ -136,7 +188,10 @@ fn spawn_backend(app: &tauri::App, port: Arc<Mutex<u16>>) -> Option<CommandChild
                             Ok(CommandEvent::Stderr(line)) => {
                                 eprintln!("[backend] {}", String::from_utf8_lossy(&line).trim_end());
                             }
-                            Ok(CommandEvent::Terminated(_)) | Err(_) => break,
+                            // onefile 首次启动需解压，FORMATWARP_PORT 数秒后
+                            // 才到达；Empty 时退出会永远错过真实端口（可能非8765）
+                            Ok(CommandEvent::Terminated(_)) => break,
+                            Err(_) => {}
                             Ok(_) => {}
                         }
                         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -156,11 +211,21 @@ fn spawn_backend(app: &tauri::App, port: Arc<Mutex<u16>>) -> Option<CommandChild
     }
 }
 
-/// 退出清理：kill 后端子进程 + 删除 pid 文件
+/// 退出清理：kill 后端整个进程树 + 删除 pid 文件
 fn cleanup(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<BackendState>() {
-        if let Some(child) = state.child.lock().unwrap().take() {
-            let _ = child.kill();
+        let mut guard = state.child.lock().unwrap();
+        if let Some(child) = guard.take() {
+            #[cfg(not(target_os = "windows"))]
+            {
+                // child.kill() 只杀直接子进程（bootloader），转换进程会变孤儿；
+                // 按整棵进程树清理
+                kill_process_tree(child.pid().try_into().unwrap());
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let _ = child.kill();
+            }
         }
         let _ = std::fs::remove_file(&state.pid_file);
     }
