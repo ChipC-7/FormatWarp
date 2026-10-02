@@ -8,6 +8,10 @@ on:
       - "v*"
   workflow_dispatch:
 
+# GITHUB_TOKEN 默认可能只读，创建/更新 Release 与上传安装包需要写权限
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
