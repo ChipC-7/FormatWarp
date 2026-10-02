@@ -3,7 +3,7 @@
   "productName": "FormatWarp",
   "mainBinaryName": "formatwarp",
   "version": "3.1.0",
-  "identifier": "com.formatwarp.app",
+  "identifier": "com.formatwarp.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

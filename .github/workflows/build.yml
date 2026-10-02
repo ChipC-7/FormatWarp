@@ -68,9 +68,13 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Windows runner 默认 cp1252，强制子进程使用 UTF-8，防止中文 print 崩溃
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         with:
           projectPath: frontend
-          tauriScript: npm run tauri build
+          # tauri-action 会自动追加 build 子命令，脚本本身只到 tauri
+          tauriScript: npm run tauri
           tagName: ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_number) }}
           releaseName: "FormatWarp ${{ github.ref_type == 'tag' && github.ref_name || format('ci-{0}', github.run_number) }}"
           releaseBody: |

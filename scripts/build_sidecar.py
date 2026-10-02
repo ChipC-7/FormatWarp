@@ -16,6 +16,11 @@ import shutil
 import subprocess
 import sys
 
+# Windows 默认控制台可能是 cp1252，脚本含中文输出，强制 UTF-8 防崩溃
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 OUT_NAME = "formatwarp-backend"
 
 
