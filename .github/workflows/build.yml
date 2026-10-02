@@ -65,6 +65,19 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      # DMG 打包是 Tauri 已知的偶发故障点：上次失败可能残留挂载卷，
+      # 导致本次 hdiutil/AppleScript 失败。打包前强制清理同名卷。
+      - name: 清理残留的 DMG 挂载卷
+        if: runner.os == 'macOS'
+        run: |
+          # 卸载所有同名残留卷（不存在时通配符保持原样，[ -d ] 自动跳过）
+          for vol in /Volumes/FormatWarp*; do
+            if [ -d "$vol" ]; then
+              echo "detach: $vol"
+              hdiutil detach "$vol" -force || true
+            fi
+          done
+
       # tauri build 会触发 beforeBuildCommand：
       #   npm run build（前端）+ python ../scripts/build_sidecar.py（sidecar）
       # sidecar 构建会自动下载对应平台的内置 pandoc。
