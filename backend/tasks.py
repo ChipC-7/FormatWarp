@@ -16,12 +16,14 @@
 """
 
 import asyncio
+import multiprocessing as mp
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from . import ws
+from . import super_pool, ws
 from .engines import audio_engine, video_engine, image_engine, doc_engine
 from .state import MODULES
 
@@ -79,6 +81,9 @@ class TaskRecord:
     output_path: str
     output_format: str
     params: Dict[str, Any]
+    # 当前下发尝试令牌：每次（重新）提交唯一，结果按令牌精确匹配，
+    # 避免排队取消后迟到的旧执行冒领重试结果
+    attempt: int = 0
     status: str = "pending"          # pending/running/paused/done/failed/cancelled
     progress: int = 0
     success: Optional[bool] = None
@@ -124,9 +129,15 @@ def unique_output_path(path: str, overwrite: bool = False) -> str:
 
 
 def compute_output_path(input_path: str, module: str, output_format: str,
-                        output_dir: str, overwrite: bool) -> str:
-    """按输出目录规则生成 out_path（沿用旧 _build_tasks 逻辑）。"""
-    ext_map = EXT_MAP.get(module, {})
+                        output_dir: str, overwrite: bool,
+                        ext_module: Optional[str] = None) -> str:
+    """按输出目录规则生成 out_path（沿用旧 _build_tasks 逻辑）。
+
+    ext_module：扩展名查表所用的模块，默认=module。视频"提取音频"时
+    实际产物是音频（如 mp3），需传 "audio"，否则在视频表里查不到
+    音频格式会错误地回退为原视频扩展名（.mp4）。
+    """
+    ext_map = EXT_MAP.get(ext_module or module, {})
     info = ext_map.get(output_format)
     ext = info["ext"] if info else os.path.splitext(input_path)[1] or ".out"
     if output_dir:
@@ -157,6 +168,19 @@ class TaskManager:
         self._lock = asyncio.Lock()
         self._next_id = 1
         self._history: List[Dict[str, Any]] = []
+
+        # 超级模式状态：进程上下文 / 管理器 / 引擎（多进程×每进程多线程）
+        self._super_enabled = False
+        self._super_nproc = 0
+        self._super_nthreads = 0
+        self._super_ctx = None
+        self._super_mgr = None
+        self._super_engine: Optional[super_pool.SuperEngine] = None
+        self._super_sem: Optional[asyncio.Semaphore] = None
+        self._super_reader: Optional[asyncio.Task] = None
+        # attempt token -> asyncio.Future（结果经 report_q 按令牌交付）
+        self._super_futures: Dict[int, Any] = {}
+        self._next_attempt = 1
 
     # ---- 生命周期 ----
     async def start(self) -> None:
@@ -198,6 +222,165 @@ class TaskManager:
         for w in self._workers:
             w.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
+        # 超级模式：停读取协程；通知转换进程排空后退出；最后关管理器
+        if self._super_reader is not None:
+            self._super_reader.cancel()
+        if self._super_engine is not None:
+            self._super_engine.request_stop()
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._drain_engine, self._super_engine
+            )
+        if self._super_mgr is not None:
+            # 客户端被 terminate 时可能泄漏引用计数导致挂起：限时等待
+            try:
+                await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, self._super_mgr.shutdown
+                    ),
+                    timeout=2.5,
+                )
+            except Exception:
+                pass
+
+    @staticmethod
+    def _drain_engine(engine) -> None:
+        """阻塞等待转换进程退出（3s），仍存活则强制结束。"""
+        engine.join(3)
+        if engine.alive_count():
+            engine.terminate()
+
+    # ---- 超级模式（多进程 × 每进程多线程） ----
+    async def apply_super(self, enabled: bool, nproc: int, nthreads: int) -> None:
+        """开关超级模式并设置进程数/每进程并发数（设置保存后即时生效）。
+
+        - 开启且进程数或线程数变化：创建新引擎（新常驻进程组）；
+          旧引擎收到哨兵后排空在途任务自然退出，不打断转换，结果照常交付；
+        - 关闭：同理发停止哨兵释放进程；ctx/mgr/队列/读取协程保留复用。
+        """
+        nproc = max(2, min(8, int(nproc)))
+        nthreads = max(1, min(8, int(nthreads)))
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            if not enabled:
+                self._super_enabled = False
+                self._super_nproc = 0
+                self._super_nthreads = 0
+                self._super_sem = None
+                old = self._super_engine
+                self._super_engine = None
+                if old is not None:
+                    old.request_stop()
+                    loop.run_in_executor(None, self._drain_engine, old)
+                return
+
+            # created_new：是否为首次初始化（失败时需整体回滚）
+            created_new = self._super_ctx is None
+            try:
+                if created_new:
+                    # Linux 用 fork（启动快、继承已加载的 PyAV）；其余平台默认 spawn
+                    ctx_name = "fork" if sys.platform.startswith("linux") else None
+                    self._super_ctx = (
+                        mp.get_context(ctx_name) if ctx_name else mp.get_context()
+                    )
+                    # report_q/cancelled 经 Manager 代理跨引擎共享
+                    # （代理对象可 pickle）；task_q 由每个引擎私有自建
+                    self._super_mgr = self._super_ctx.Manager()
+                    self._super_report_q = self._super_mgr.Queue()
+                    self._super_cancelled = self._super_mgr.list()
+                    self._super_reader = asyncio.create_task(self._pump_super())
+                if (self._super_engine is None
+                        or self._super_nproc != nproc
+                        or self._super_nthreads != nthreads):
+                    old = self._super_engine
+                    self._super_engine = super_pool.SuperEngine(
+                        self._super_ctx, self._super_mgr, nproc, nthreads,
+                        self._super_report_q, self._super_cancelled,
+                    )
+                    self._super_sem = asyncio.Semaphore(
+                        self._super_engine.total_slots
+                    )
+                    self._super_nproc = nproc
+                    self._super_nthreads = nthreads
+                    if old is not None:
+                        # 旧进程排空在途任务后退出（不取消，结果经 future 交付）
+                        old.request_stop()
+                        loop.run_in_executor(None, self._drain_engine, old)
+                self._super_enabled = True
+            except Exception:
+                # 首次创建偶发失败（多线程进程中 fork Manager 时序问题等）：
+                # 记录完整 traceback（日志页可查），回滚半初始化状态，
+                # 用户再次保存即可重建（自愈）
+                import traceback
+                detail = traceback.format_exc()
+                if created_new:
+                    if self._super_reader is not None:
+                        self._super_reader.cancel()
+                    if self._super_mgr is not None:
+                        try:
+                            self._super_mgr.shutdown()
+                        except Exception:
+                            pass
+                    self._super_ctx = None
+                    self._super_mgr = None
+                    self._super_reader = None
+                self._super_engine = None
+                self._super_sem = None
+                self._super_nproc = 0
+                self._super_nthreads = 0
+                self._super_enabled = False
+                ws.push_log("error", f"超级模式初始化失败（再次保存可重试）：\n{detail}")
+                await ws.manager.broadcast(
+                    ws.msg_log("error", f"超级模式初始化失败（再次保存可重试）：\n{detail}")
+                )
+                raise
+
+    async def _pump_super(self) -> None:
+        """读取转换进程上行：进度→广播；结果→交付对应 future。"""
+        loop = asyncio.get_running_loop()
+        while True:
+            try:
+                item = await loop.run_in_executor(
+                    None, self._super_report_q.get
+                )
+            except Exception:
+                break
+            if not item:
+                continue
+            kind = item[0]
+            if kind == "progress":
+                _, task_id, pct = item
+                rec = self._tasks.get(task_id)
+                if rec is None:
+                    continue
+                rec.progress = pct
+                await ws.manager.broadcast(
+                    ws.msg_progress(rec.module, task_id, pct)
+                )
+            elif kind == "result":
+                _, attempt, ok, msg = item
+                # 仅匹配本次尝试的 future；排队取消后的迟到旧结果自动丢弃
+                fut = self._super_futures.pop(attempt, None)
+                if fut is not None and not fut.done():
+                    fut.set_result((ok, msg))
+
+    def _submit_super(self, rec: TaskRecord) -> Any:
+        """下发任务到转换进程组，返回等待结果的 asyncio future。"""
+        attempt = self._next_attempt
+        self._next_attempt += 1
+        rec.attempt = attempt
+        fut = asyncio.get_running_loop().create_future()
+        self._super_futures[attempt] = fut
+        fields = {
+            "module": rec.module,
+            "input_path": rec.input_path,
+            "output_path": rec.output_path,
+            "output_format": rec.output_format,
+            "task_id": rec.task_id,
+            "attempt": attempt,
+            "params": rec.params,
+        }
+        self._super_engine.submit(fields)
+        return fut
 
     def _new_batch_id(self) -> str:
         return f"batch-{int(time.time() * 1000)}"
@@ -230,8 +413,13 @@ class TaskManager:
                     created.append(rec)
                     continue
 
-                out_path = compute_output_path(input_path, module, output_format,
-                                               output_dir, overwrite)
+                # 视频提取音频：产物是音频流，按音频格式表确定扩展名
+                is_extract_audio = (module == "video"
+                                    and bool(params.get("extract_audio")))
+                out_path = compute_output_path(
+                    input_path, module, output_format, output_dir, overwrite,
+                    ext_module="audio" if is_extract_audio else None,
+                )
                 # 确保输出目录存在（audio/video 引擎不自动建目录）
                 try:
                     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -255,11 +443,18 @@ class TaskManager:
             await self._process_task(task_id)
 
     async def _process_task(self, task_id: int) -> None:
-        # 先拿全局兜底上限，再拿模块信号量（两把信号量释放后任务结束）
-        async with self._global_sem:
-            rec = self._tasks.get(task_id)
-            if rec is None:
+        rec = self._tasks.get(task_id)
+        if rec is None:
+            return
+        # 超级模式：由总名额信号量限流（N×T），不再经过模块信号量/全局上限
+        if self._super_enabled and self._super_engine is not None:
+            if self._super_sem is None:
                 return
+            async with self._super_sem:
+                await self._run_one(rec)
+            return
+        # 普通模式：先拿全局兜底上限，再拿模块信号量
+        async with self._global_sem:
             module_sem = self._semaphores.get(rec.module)
             if module_sem is None:
                 return
@@ -286,44 +481,59 @@ class TaskManager:
         await self._emit_log("info", f"{MODULE_LABEL[rec.module]} 开始转换: {rec.filename}")
 
         loop = asyncio.get_running_loop()
-        engine_fn = ENGINE_MAP[rec.module]
+        use_super = self._super_enabled and self._super_engine is not None
 
-        # 进度节流：4 次/秒（>=250ms），100 强制发送；由线程池回调驱动
-        last_emit = {"t": 0.0}
+        if use_super:
+            # 超级模式：下发到转换进程组；进度/结果由 _pump_super 经
+            # report_q 读取；中止通过共享 cancelled 列表
+            engine_awaitable = self._submit_super(rec)
+        else:
+            # 普通模式：同步引擎丢线程池，进度回调 4 次/秒节流
+            # （>=250ms），100 强制发送
+            last_emit = {"t": 0.0}
 
-        def progress_cb(percent: int) -> None:
-            rec.progress = max(0, min(100, int(percent)))
-            now = time.monotonic()
-            if rec.progress == 100 or (now - last_emit["t"]) >= 0.25:
-                last_emit["t"] = now
-                asyncio.run_coroutine_threadsafe(
-                    ws.manager.broadcast(ws.msg_progress(rec.module, rec.task_id, rec.progress)),
-                    loop,
-                )
+            def progress_cb(percent: int) -> None:
+                rec.progress = max(0, min(100, int(percent)))
+                now = time.monotonic()
+                if rec.progress == 100 or (now - last_emit["t"]) >= 0.25:
+                    last_emit["t"] = now
+                    asyncio.run_coroutine_threadsafe(
+                        ws.manager.broadcast(ws.msg_progress(rec.module, rec.task_id, rec.progress)),
+                        loop,
+                    )
 
-        def abort_cb() -> bool:
-            return task_id in self._cancelled
+            def abort_cb() -> bool:
+                return task_id in self._cancelled
+
+            engine_awaitable = loop.run_in_executor(
+                None, ENGINE_MAP[rec.module], EngineTask(rec), progress_cb, abort_cb
+            )
 
         timeout_s = int(self._settings.get("task_timeout_minutes", 0) or 0) * 60
         started = time.monotonic()
         try:
             if timeout_s > 0:
-                ok, msg = await asyncio.wait_for(
-                    loop.run_in_executor(None, engine_fn, EngineTask(rec), progress_cb, abort_cb),
-                    timeout=timeout_s,
-                )
+                ok, msg = await asyncio.wait_for(engine_awaitable, timeout=timeout_s)
             else:
-                ok, msg = await loop.run_in_executor(
-                    None, engine_fn, EngineTask(rec), progress_cb, abort_cb
-                )
+                ok, msg = await engine_awaitable
         except asyncio.TimeoutError:
-            # 通知后台线程感知中止（引擎会删除半成品），随后标记失败
+            # 通知转换进程感知中止（引擎会删除半成品），随后标记失败
             self._cancelled.add(task_id)
+            if self._super_engine is not None:
+                self._super_engine.request_cancel(task_id)
             self._delete_partial(rec)
             ok, msg = False, f"转换超时（>{timeout_s} 秒），已终止"
-        except Exception as e:
+        except BaseException as e:
+            # 引擎重建等场景 future 理论上不会被取消（队列共享）；
+            # CancelledError 属 BaseException，协程取消时继续向上抛
+            if isinstance(e, asyncio.CancelledError):
+                raise
             self._delete_partial(rec)
             ok, msg = False, f"转换异常: {e}"
+        finally:
+            # 清除取消标记：保证同 id 重试不会被立即中止
+            if self._super_engine is not None:
+                self._super_engine.clear_cancel(task_id)
 
         rec.duration_ms = (time.monotonic() - started) * 1000.0
 
@@ -386,7 +596,15 @@ class TaskManager:
             return {"ok": False, "message": f"任务 {task_id} 已结束（{rec.status}），无法取消"}
         self._cancelled.add(task_id)
         self._paused.discard(task_id)
+        # 超级模式：通过共享取消列表通知转换进程中止
+        if self._super_engine is not None:
+            self._super_engine.request_cancel(task_id)
         if rec.status == "pending":
+            # 已下发到队列的任务撤不回：立即作废本次尝试的 future，
+            # 迟到的旧执行结果回来时找不到 future，自动忽略
+            fut = self._super_futures.pop(rec.attempt, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
             await self._finish(rec, "cancelled", False, "已取消")
         # running 状态由引擎解码循环感知 abort 后自行结束
         return {"ok": True, "message": f"已请求取消任务 {task_id}"}
@@ -410,6 +628,9 @@ class TaskManager:
         rec.finished_at = 0.0
         self._cancelled.discard(task_id)
         self._paused.discard(task_id)
+        # 超级模式：清除共享取消标记，否则重新下发会被立即中止
+        if self._super_engine is not None:
+            self._super_engine.clear_cancel(task_id)
         # 重新生成唯一输出路径
         rec.output_path = unique_output_path(
             rec.output_path, overwrite=False

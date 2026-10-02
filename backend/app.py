@@ -32,7 +32,7 @@ from .engines import audio_engine, video_engine, image_engine, doc_engine
 
 import av_engine  # 项目根目录的 av_engine（backend.engines.__init__ 已加 sys.path）
 
-APP_VERSION = "3.0.0"
+APP_VERSION = "3.1.0"
 
 # =====================================================================
 # 引擎探测
@@ -83,6 +83,13 @@ async def lifespan(app: FastAPI):
     app.state.engine_status = engine_status
     app.state.settings = settings
     app.state.tm = tm
+
+    # 恢复上次的超级模式开关（保存在 settings.json）
+    if settings.get("super_mode", False):
+        await tm.apply_super(
+            True, settings.get("super_processes", 4),
+            settings.get("super_threads", 4),
+        )
 
     ws.push_log("info", f"后端启动完成，引擎状态: PyAV={engine_status['av']['available']} "
                         f"Pillow={engine_status['pillow']}")
@@ -254,6 +261,10 @@ async def set_settings(payload: SettingsModel) -> Dict[str, Any]:
     # 按模块热更新并行数：设置保存后即时生效（无需重启）
     for module, value in payload.max_parallel.items():
         await _tm().set_max_parallel(module, value)
+    # 超级模式（多进程 × 每进程多线程）热生效
+    await _tm().apply_super(
+        payload.super_mode, payload.super_processes, payload.super_threads
+    )
     return {"ok": True, "settings": s.as_dict()}
 
 
@@ -340,7 +351,9 @@ def main() -> None:
     port = find_free_port()
     # 供 Tauri Rust 壳解析
     print(f"FORMATWARP_PORT={port}", flush=True)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
+    # 优雅关闭最多等 5s：避免前端 WebSocket 未及时断开时进程无限挂起
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="info",
+                timeout_graceful_shutdown=5)
 
 
 if __name__ == "__main__":

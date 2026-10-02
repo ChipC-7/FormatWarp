@@ -18,6 +18,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Optional, Tuple
 
+from ..resources_resolver import find_bundled
+
 # =====================================================================
 # 格式预设表（沿用旧 doc_converter.py）
 # =====================================================================
@@ -92,8 +94,9 @@ def _delete_partial(path: str) -> None:
 # =====================================================================
 
 def _find_pandoc() -> Optional[str]:
+    """优先使用随应用内置的 pandoc，其次系统 PATH。"""
     try:
-        return shutil.which("pandoc")
+        return find_bundled("pandoc", env_var="FORMATWARP_PANDOC")
     except Exception:
         return None
 

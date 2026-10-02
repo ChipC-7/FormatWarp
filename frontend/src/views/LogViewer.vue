@@ -4,6 +4,7 @@ import { computed } from "vue";
 import { NButton, NCard, NEmpty, NList, NListItem } from "naive-ui";
 import { useTasksStore } from "../stores/tasks";
 import { useEngineStore } from "../stores/engine";
+import AppIcon from "../components/AppIcon.vue";
 import type { LogLevel } from "../types/backend";
 
 const tasks = useTasksStore();
@@ -16,8 +17,9 @@ const LEVEL_COLOR: Record<LogLevel, string> = {
   warning: "#f9a826",
   error: "#e94560",
 };
+// 级别 → 线性图标
 const LEVEL_ICON: Record<LogLevel, string> = {
-  info: "ℹ️", success: "✅", warning: "⚠️", error: "❌",
+  info: "info", success: "check-circle", warning: "alert", error: "x-circle",
 };
 
 /** 倒序显示（最新在上） */
@@ -28,41 +30,60 @@ function clearLogs(): void {
 }
 
 // ---------- 引擎状态卡片 ----------
-const engineLines = computed(() => {
+interface EngineLine { icon: string; text: string; ok?: boolean }
+const engineLines = computed<EngineLine[]>(() => {
   const av = engine.status?.av;
   const doc = engine.status?.doc;
-  const lines: string[] = [];
+  const lines: EngineLine[] = [];
   if (!av) {
-    return ["引擎状态：加载中…"];
+    return [{ icon: "info", text: "引擎状态：加载中…" }];
   }
   if (av.available) {
-    lines.push(`状态:  ✓ 已就绪`);
-    lines.push(`版本:  PyAV ${av.version}（内置 FFmpeg）`);
+    lines.push({ icon: "check-circle", text: "状态：已就绪", ok: true });
+    lines.push({ icon: "info", text: `版本：PyAV ${av.version}（内置 FFmpeg）` });
     const gpuNames = Object.values(av.gpu ?? {});
-    lines.push(`硬件:  ${gpuNames.length ? gpuNames.join("、") : "未检测到可用 GPU"}`);
+    lines.push({ icon: "info", text: `硬件：${gpuNames.length ? gpuNames.join("、") : "未检测到可用 GPU"}` });
   } else {
-    lines.push("状态:  ✗ 未检测到 PyAV 引擎");
+    lines.push({ icon: "x-circle", text: "状态：未检测到 PyAV 引擎" });
   }
-  lines.push(`Pillow: ${engine.status?.pillow ? "✅ 可用" : "❌ 不可用"}`);
+  lines.push({
+    icon: engine.status?.pillow ? "check-circle" : "x-circle",
+    text: `Pillow：${engine.status?.pillow ? "可用" : "不可用"}`,
+  });
   if (doc) {
-    lines.push(`pandoc: ${doc.pandoc ? `✅ ${doc.pandoc}` : "❌ 未检测到"}`);
-    lines.push(`wkhtmltopdf: ${doc.wkhtmltopdf ? `✅ ${doc.wkhtmltopdf}` : "—"}`);
+    lines.push({
+      icon: doc.pandoc ? "check-circle" : "x-circle",
+      text: `pandoc：${doc.pandoc ?? "未检测到"}`,
+    });
+    lines.push({
+      icon: doc.wkhtmltopdf ? "check-circle" : "info",
+      text: `wkhtmltopdf：${doc.wkhtmltopdf ?? "—"}`,
+    });
   }
   return lines;
 });
 </script>
 
 <template>
-  <n-card title="📋 运行日志" class="page-card">
+  <n-card class="page-card">
+    <template #header>
+      <span class="card-title"><AppIcon name="logs" :size="18" /> 运行日志</span>
+    </template>
     <!-- 引擎状态卡片 -->
     <n-card title="引擎状态" size="small" class="engine-card">
-      <div v-for="(l, i) in engineLines" :key="i" class="engine-line">{{ l }}</div>
+      <div v-for="(l, i) in engineLines" :key="i" class="engine-line">
+        <AppIcon :name="l.icon" :size="14" :class="l.ok ? 'ok-icon' : ''" />
+        <span>{{ l.text }}</span>
+      </div>
     </n-card>
 
     <!-- 日志流 -->
     <div class="log-header">
       <span class="log-title">事件日志（最多 500 条）</span>
-      <n-button size="small" @click="clearLogs">🗑 清空日志</n-button>
+      <n-button size="small" @click="clearLogs">
+        <template #icon><AppIcon name="trash" :size="14" /></template>
+        清空日志
+      </n-button>
     </div>
 
     <div class="log-body">
@@ -70,7 +91,9 @@ const engineLines = computed(() => {
       <n-list v-else>
         <n-list-item v-for="(l, i) in reversedLogs" :key="i" class="log-item">
           <span class="log-text" :style="{ color: LEVEL_COLOR[l.level] }">
-            {{ l.ts }} {{ LEVEL_ICON[l.level] }} {{ l.message }}
+            {{ l.ts }}
+            <AppIcon :name="LEVEL_ICON[l.level]" :size="13" class="log-level-icon" />
+            {{ l.message }}
           </span>
         </n-list-item>
       </n-list>
@@ -79,6 +102,11 @@ const engineLines = computed(() => {
 </template>
 
 <style scoped>
+.card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 .engine-card {
   margin-bottom: 16px;
 }
@@ -87,6 +115,14 @@ const engineLines = computed(() => {
   font-size: 12px;
   line-height: 1.9;
   word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.ok-icon { color: #34d399; }
+.log-level-icon {
+  vertical-align: -2px;
+  margin: 0 2px;
 }
 .log-header {
   display: flex;

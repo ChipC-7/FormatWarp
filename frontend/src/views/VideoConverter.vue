@@ -8,6 +8,7 @@ import {
 import type { SelectOption } from "naive-ui";
 import { useConverterPage } from "../composables/useConverterPage";
 import { useEngineStore } from "../stores/engine";
+import AppIcon from "../components/AppIcon.vue";
 
 const page = useConverterPage("video", false);
 const engine = useEngineStore();
@@ -86,11 +87,11 @@ const gpuHint = computed(() => {
     const gpu = engine.status?.av.gpu ?? {};
     const names = Object.values(gpu);
     return names.length
-      ? `💡 检测到 ${names.join("、")} 硬件，已自动开启加速；转换失败将自动降级为 CPU 编码`
-      : "💡 未检测到可用硬件编码器，将使用 CPU 软件编码";
+      ? `检测到 ${names.join("、")} 硬件，已自动开启加速；转换失败将自动降级为 CPU 编码`
+      : "未检测到可用硬件编码器，将使用 CPU 软件编码";
   }
   if (hwValue.value === "__cpu__") return "使用 CPU 软件编码，兼容性最好但速度较慢";
-  return "💡 硬件加速模式下转换速度可提升 5-20 倍；如转换失败将自动降级为 CPU 编码";
+  return "硬件加速模式下转换速度可提升 5-20 倍；如转换失败将自动降级为 CPU 编码";
 });
 
 function restoreNull(v: string | number): unknown {
@@ -119,11 +120,15 @@ async function startConversion(): Promise<void> {
 
 <template>
   <n-spin :show="page.loadingFormats.value">
-    <n-alert type="success" :show-icon="false" class="hint">
-      🔒 文件不出本机，全程本地转换（PyAV 进程内引擎）。
+    <n-alert type="success" class="hint">
+      <template #icon><AppIcon name="lock" :size="16" /></template>
+      文件不出本机，全程本地转换（PyAV 进程内引擎）。
     </n-alert>
 
-    <n-card title="🎬 视频格式转换" class="page-card">
+    <n-card class="page-card">
+      <template #header>
+        <span class="card-title"><AppIcon name="video" :size="18" /> 视频格式转换</span>
+      </template>
       <div class="layout">
         <!-- 左：文件列表 -->
         <n-card title="待转换文件" size="small" class="panel">
@@ -144,7 +149,7 @@ async function startConversion(): Promise<void> {
                 @contextmenu.prevent="page.onContextMenu($event, f.path)"
               >
                 <div class="file-row">
-                  <span class="file-name">🎬 {{ f.name }}</span>
+                  <span class="file-name"><AppIcon name="video" :size="14" class="file-ico" /> {{ f.name }}</span>
                   <span class="file-size">{{ page.formatSize(f.size) }}</span>
                   <n-button size="tiny" text type="error" @click="page.removeFile(f.path)">移除</n-button>
                 </div>
@@ -152,8 +157,14 @@ async function startConversion(): Promise<void> {
             </n-list>
           </div>
           <div class="file-actions">
-            <n-button size="small" @click="page.addFilesDialog()">➕ 添加文件</n-button>
-            <n-button size="small" @click="page.clearFiles()">🗑 清空全部</n-button>
+            <n-button size="small" @click="page.addFilesDialog()">
+              <template #icon><AppIcon name="plus" :size="15" /></template>
+              添加文件
+            </n-button>
+            <n-button size="small" @click="page.clearFiles()">
+              <template #icon><AppIcon name="trash" :size="15" /></template>
+              清空全部
+            </n-button>
           </div>
         </n-card>
 
@@ -195,10 +206,17 @@ async function startConversion(): Promise<void> {
       <n-space class="action-bar" justify="space-between" align="center">
         <n-space>
           <n-button type="primary" :loading="page.converting.value" @click="startConversion">
-            ▶ 开始转换
+            <template #icon><AppIcon name="play" :size="15" /></template>
+            开始转换
           </n-button>
-          <n-button :disabled="!page.converting.value" @click="page.stop()">⏹ 停止</n-button>
-          <n-button @click="page.openOutputDir(outputDir.trim())">📂 打开输出目录</n-button>
+          <n-button :disabled="!page.converting.value" @click="page.stop()">
+            <template #icon><AppIcon name="stop" :size="14" /></template>
+            停止
+          </n-button>
+          <n-button @click="page.openOutputDir(outputDir.trim())">
+            <template #icon><AppIcon name="folder-open" :size="15" /></template>
+            打开输出目录
+          </n-button>
         </n-space>
         <n-space v-if="page.batchTasks.value.length" vertical size="small" class="progress-block">
           <span class="progress-text">
@@ -221,6 +239,14 @@ async function startConversion(): Promise<void> {
 </template>
 
 <style scoped>
+.card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.file-ico {
+  vertical-align: -2px;
+}
 .hint { margin-bottom: 12px; }
 .layout { display: flex; gap: 16px; align-items: stretch; }
 .panel { flex: 1; min-width: 0; }

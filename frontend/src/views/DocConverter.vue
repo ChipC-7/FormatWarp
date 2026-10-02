@@ -9,6 +9,7 @@ import {
 import type { SelectOption } from "naive-ui";
 import { useConverterPage } from "../composables/useConverterPage";
 import { useEngineStore } from "../stores/engine";
+import AppIcon from "../components/AppIcon.vue";
 
 const page = useConverterPage("doc", true); // 拖入允许递归目录
 const engine = useEngineStore();
@@ -39,35 +40,36 @@ async function startConversion(): Promise<void> {
 
 // ---------- 引擎状态面板 ----------
 interface EngineLine {
-  kind: "ok" | "warn" | "info";
+  icon: string;
+  tone: "ok" | "warn" | "info";
   text: string;
 }
 const engineLines = computed<EngineLine[]>(() => {
   const d = engine.status?.doc;
-  if (!d) return [{ kind: "info", text: "引擎状态：加载中…" }];
+  if (!d) return [{ icon: "info", tone: "info", text: "引擎状态：加载中…" }];
   const lines: EngineLine[] = [];
   const nativeHits = Object.entries(d.native_flags).filter(([, v]) => v).map(([k]) => k);
   lines.push(
     nativeHits.length
-      ? { kind: "ok", text: `✅ Python 原生库: ${nativeHits.join(",")}` }
-      : { kind: "warn", text: "❌ 无可用 Python 原生文档库（缺少依赖）" },
+      ? { icon: "check-circle", tone: "ok", text: `Python 原生库：${nativeHits.join(",")}` }
+      : { icon: "x-circle", tone: "warn", text: "无可用 Python 原生文档库（缺少依赖）" },
   );
   // 已安装但导入失败
   const broken = Object.entries(d.native_errors)
     .filter(([, msg]) => msg && !String(msg).startsWith("未安装"))
     .map(([k]) => k);
   if (broken.length) {
-    lines.push({ kind: "warn", text: `⚠️ 已安装但导入失败: ${broken.join(", ")}` });
+    lines.push({ icon: "alert", tone: "warn", text: `已安装但导入失败：${broken.join(", ")}` });
   }
   lines.push(
     d.pandoc
-      ? { kind: "ok", text: `✅ pandoc (主力): ${d.pandoc}` }
-      : { kind: "warn", text: "⚠️ 未检测到 pandoc（通用文档互转主力）" },
+      ? { icon: "check-circle", tone: "ok", text: `pandoc（主力）：${d.pandoc}` }
+      : { icon: "alert", tone: "warn", text: "未检测到 pandoc（通用文档互转主力）" },
   );
   if (d.wkhtmltopdf) {
-    lines.push({ kind: "ok", text: `✅ wkhtmltopdf: ${d.wkhtmltopdf}` });
+    lines.push({ icon: "check-circle", tone: "ok", text: `wkhtmltopdf：${d.wkhtmltopdf}` });
   } else if (!d.native_flags.weasyprint) {
-    lines.push({ kind: "info", text: "ℹ️ 未检测到 HTML→PDF 引擎（推荐 weasyprint 或 wkhtmltopdf）" });
+    lines.push({ icon: "info", tone: "info", text: "未检测到 HTML→PDF 引擎（推荐 weasyprint 或 wkhtmltopdf）" });
   }
   return lines;
 });
@@ -75,11 +77,15 @@ const engineLines = computed<EngineLine[]>(() => {
 
 <template>
   <n-spin :show="page.loadingFormats.value">
-    <n-alert type="success" :show-icon="false" class="hint">
-      🔒 文件不出本机，全程本地转换（五级文档引擎链）。
+    <n-alert type="success" class="hint">
+      <template #icon><AppIcon name="lock" :size="16" /></template>
+      文件不出本机，全程本地转换（五级文档引擎链）。
     </n-alert>
 
-    <n-card title="📄 文档格式转换" class="page-card">
+    <n-card class="page-card">
+      <template #header>
+        <span class="card-title"><AppIcon name="doc" :size="18" /> 文档格式转换</span>
+      </template>
       <div class="layout">
         <!-- 左：文件列表（支持递归目录） -->
         <n-card title="待转换文档" size="small" class="panel">
@@ -100,7 +106,7 @@ const engineLines = computed<EngineLine[]>(() => {
                 @contextmenu.prevent="page.onContextMenu($event, f.path)"
               >
                 <div class="file-row">
-                  <span class="file-name">📄 {{ f.name }}</span>
+                  <span class="file-name"><AppIcon name="doc" :size="14" class="file-ico" /> {{ f.name }}</span>
                   <span class="file-size">{{ page.formatSize(f.size) }}</span>
                   <n-button size="tiny" text type="error" @click="page.removeFile(f.path)">移除</n-button>
                 </div>
@@ -108,8 +114,14 @@ const engineLines = computed<EngineLine[]>(() => {
             </n-list>
           </div>
           <div class="file-actions">
-            <n-button size="small" @click="page.addFilesDialog()">➕ 添加文件/文件夹</n-button>
-            <n-button size="small" @click="page.clearFiles()">🗑 清空全部</n-button>
+            <n-button size="small" @click="page.addFilesDialog()">
+              <template #icon><AppIcon name="plus" :size="15" /></template>
+              添加文件/文件夹
+            </n-button>
+            <n-button size="small" @click="page.clearFiles()">
+              <template #icon><AppIcon name="trash" :size="15" /></template>
+              清空全部
+            </n-button>
           </div>
         </n-card>
 
@@ -135,8 +147,11 @@ const engineLines = computed<EngineLine[]>(() => {
 
           <!-- 引擎状态卡片（对齐旧版"引擎状态"面板） -->
           <div class="engine-card">
-            <div class="engine-title">🔧 引擎状态</div>
-            <div v-for="(l, i) in engineLines" :key="i" class="engine-line">{{ l.text }}</div>
+            <div class="engine-title"><AppIcon name="wrench" :size="14" class="title-ico" /> 引擎状态</div>
+            <div v-for="(l, i) in engineLines" :key="i" class="engine-line" :class="l.tone">
+              <AppIcon :name="l.icon" :size="13" class="line-ico" />
+              <span>{{ l.text }}</span>
+            </div>
           </div>
         </n-card>
       </div>
@@ -145,10 +160,17 @@ const engineLines = computed<EngineLine[]>(() => {
       <n-space class="action-bar" justify="space-between" align="center">
         <n-space>
           <n-button type="primary" :loading="page.converting.value" @click="startConversion">
-            ▶ 开始转换
+            <template #icon><AppIcon name="play" :size="15" /></template>
+            开始转换
           </n-button>
-          <n-button :disabled="!page.converting.value" @click="page.stop()">⏹ 停止</n-button>
-          <n-button @click="page.openOutputDir(outputDir.trim())">📂 打开输出目录</n-button>
+          <n-button :disabled="!page.converting.value" @click="page.stop()">
+            <template #icon><AppIcon name="stop" :size="14" /></template>
+            停止
+          </n-button>
+          <n-button @click="page.openOutputDir(outputDir.trim())">
+            <template #icon><AppIcon name="folder-open" :size="15" /></template>
+            打开输出目录
+          </n-button>
         </n-space>
         <n-space v-if="page.batchTasks.value.length" vertical size="small" class="progress-block">
           <span class="progress-text">
@@ -171,6 +193,17 @@ const engineLines = computed<EngineLine[]>(() => {
 </template>
 
 <style scoped>
+.card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.file-ico {
+  vertical-align: -2px;
+}
+.title-ico {
+  vertical-align: -2px;
+}
 .hint { margin-bottom: 12px; }
 .layout { display: flex; gap: 16px; align-items: stretch; }
 .panel { flex: 1; min-width: 0; }
@@ -205,11 +238,23 @@ const engineLines = computed<EngineLine[]>(() => {
   font-weight: 600;
   margin-bottom: 6px;
   font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .engine-line {
   font-family: "JetBrains Mono", "Consolas", monospace;
   font-size: 12px;
   line-height: 1.8;
   word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.engine-line.ok { color: #34d399; }
+.engine-line.warn { color: #fbbf24; }
+.engine-line.info { color: #94a3b8; }
+.line-ico {
+  flex-shrink: 0;
 }
 </style>

@@ -13,6 +13,9 @@ export const useSettingsStore = defineStore("settings", () => {
   const defaultOutputDir = ref("");
   const maxParallel = ref<ParallelMap>({ ...DEFAULT_PARALLEL });
   const taskTimeoutMinutes = ref(0);
+  const superMode = ref(false);
+  const superProcesses = ref(4);
+  const superThreads = ref(4);
 
   /** 从后端加载设置并写入 store */
   async function load(): Promise<void> {
@@ -30,6 +33,9 @@ export const useSettingsStore = defineStore("settings", () => {
     defaultOutputDir.value = s.default_output_dir ?? "";
     maxParallel.value = { ...DEFAULT_PARALLEL, ...(s.max_parallel ?? {}) };
     taskTimeoutMinutes.value = s.task_timeout_minutes;
+    superMode.value = Boolean(s.super_mode);
+    superProcesses.value = s.super_processes ?? 4;
+    superThreads.value = s.super_threads ?? 4;
   }
 
   /** 持久化到后端 */
@@ -39,6 +45,9 @@ export const useSettingsStore = defineStore("settings", () => {
       default_output_dir: defaultOutputDir.value,
       max_parallel: maxParallel.value,
       task_timeout_minutes: taskTimeoutMinutes.value,
+      super_mode: superMode.value,
+      super_processes: superProcesses.value,
+      super_threads: superThreads.value,
     });
   }
 
@@ -53,6 +62,9 @@ export const useSettingsStore = defineStore("settings", () => {
     defaultOutputDir,
     maxParallel,
     taskTimeoutMinutes,
+    superMode,
+    superProcesses,
+    superThreads,
     load,
     apply,
     save,

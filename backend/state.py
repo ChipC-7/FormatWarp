@@ -36,7 +36,17 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "default_output_dir": "",
     "max_parallel": _default_parallel(),
     "task_timeout_minutes": 0,
+    # 超级模式：N 个转换进程，每进程内部 T 线程同时转换多个文件
+    "super_mode": False,
+    "super_processes": 4,
+    "super_threads": 4,
 }
+
+# 超级模式进程数取值区间：2-8；每进程并发文件数：1-8
+SUPER_PROCESSES_MIN = 2
+SUPER_PROCESSES_MAX = 8
+SUPER_THREADS_MIN = 1
+SUPER_THREADS_MAX = 8
 
 
 def get_config_dir() -> Path:
@@ -106,6 +116,23 @@ class SettingsStore:
         except Exception:
             d["task_timeout_minutes"] = 0
         d["default_output_dir"] = str(d.get("default_output_dir", "") or "")
+
+        # 超级模式：布尔开关 + 进程数(2-8) + 每进程并发数(1-8)
+        d["super_mode"] = bool(d.get("super_mode", False))
+        try:
+            d["super_processes"] = max(
+                SUPER_PROCESSES_MIN,
+                min(SUPER_PROCESSES_MAX, int(d.get("super_processes", 4))),
+            )
+        except Exception:
+            d["super_processes"] = 4
+        try:
+            d["super_threads"] = max(
+                SUPER_THREADS_MIN,
+                min(SUPER_THREADS_MAX, int(d.get("super_threads", 4))),
+            )
+        except Exception:
+            d["super_threads"] = 4
 
         # 旧格式迁移：立即写回，用户无感
         if migrated:

@@ -15,6 +15,7 @@ import { apiGet, apiPost } from "../api/client";
 import { connected, onMessage } from "../composables/useBackend";
 import { useTasksStore } from "../stores/tasks";
 import { useSettingsStore } from "../stores/settings";
+import AppIcon from "../components/AppIcon.vue";
 import type {
   ApiResult, CreateTaskRequest, FormatsResponse, ModuleName,
   TaskStatus, WsServerMessage,
@@ -204,6 +205,7 @@ async function browseOutputDir(): Promise<void> {
 
 // ---------- 转换执行 ----------
 const converting = ref(false);
+let batchStartTs = 0;
 const batchId = ref("");
 interface BatchTask {
   task_id: number;
@@ -214,6 +216,11 @@ interface BatchTask {
 const batchTasks = ref<BatchTask[]>([]);
 
 async function startConversion(): Promise<void> {
+  if (converting.value) {
+    // 重入保护：避免快速双击/未清空时重复提交（会翻倍任务数拖慢速度）
+    message.warning("当前批次仍在转换中，请等待完成或先停止");
+    return;
+  }
   if (!files.value.length) {
     message.warning("请先添加要转换的音频文件");
     return;
@@ -236,6 +243,7 @@ async function startConversion(): Promise<void> {
     overwrite: false,
   };
   converting.value = true;
+  batchStartTs = performance.now();
   try {
     const resp = await tasks.submit(req);
     batchId.value = resp.batch_id ?? "";
@@ -302,6 +310,10 @@ function onWs(msg: WsServerMessage): void {
     batchTasks.value[idx].status = msg.success ? "done" : "failed";
     if (batchTasks.value.every((t) => t.status === "done" || t.status === "failed" || t.status === "cancelled")) {
       converting.value = false;
+      // 本批实际墙钟（界面口径）
+      const wall = (performance.now() - batchStartTs) / 1000;
+      const okN = batchTasks.value.filter((t) => t.status === "done").length;
+      message.info(`本批 ${batchTasks.value.length} 个任务，成功 ${okN} 个，实际用时 ${wall.toFixed(1)} 秒`);
     }
   }
 }
@@ -334,11 +346,15 @@ onUnmounted(() => {
 
 <template>
   <n-spin :show="loadingFormats">
-    <n-alert type="success" :show-icon="false" class="local-hint">
-      🔒 文件不出本机，全程本地转换（PyAV 进程内引擎）。
+    <n-alert type="success" class="local-hint">
+      <template #icon><AppIcon name="lock" :size="16" /></template>
+      文件不出本机，全程本地转换（PyAV 进程内引擎）。
     </n-alert>
 
-    <n-card title="🎵 音频格式转换" class="page-card">
+    <n-card class="page-card">
+      <template #header>
+        <span class="card-title"><AppIcon name="audio" :size="18" /> 音频格式转换</span>
+      </template>
       <div class="layout">
         <!-- 左：文件列表 -->
         <n-card title="待转换文件" size="small" class="panel">
@@ -357,7 +373,7 @@ onUnmounted(() => {
                 @contextmenu.prevent="onContextMenu($event, f.path)"
               >
                 <div class="file-row">
-                  <span class="file-name">🎵 {{ f.name }}</span>
+                  <span class="file-name"><AppIcon name="audio" :size="14" class="file-ico" /> {{ f.name }}</span>
                   <span class="file-size">{{ formatSize(f.size) }}</span>
                   <n-button size="tiny" text type="error" @click="removeFile(f.path)">移除</n-button>
                 </div>
@@ -365,8 +381,14 @@ onUnmounted(() => {
             </n-list>
           </div>
           <div class="file-actions">
-            <n-button size="small" @click="addFilesDialog">➕ 添加文件</n-button>
-            <n-button size="small" @click="clearFiles">🗑 清空全部</n-button>
+            <n-button size="small" @click="addFilesDialog">
+              <template #icon><AppIcon name="plus" :size="15" /></template>
+              添加文件
+            </n-button>
+            <n-button size="small" @click="clearFiles">
+              <template #icon><AppIcon name="trash" :size="15" /></template>
+              清空全部
+            </n-button>
           </div>
         </n-card>
 
@@ -393,6 +415,7 @@ onUnmounted(() => {
             </n-form-item>
             <n-form-item label="归一化">
               <n-checkbox v-model:checked="normalize">音量归一化 (Normalize)</n-checkbox>
+              <span class="norm-hint"><AppIcon name="alert" :size="13" class="hint-ico" /> loudnorm 滤镜很耗 CPU，开启后转换可能慢约一倍</span>
             </n-form-item>
           </n-form>
         </n-card>
@@ -401,11 +424,23 @@ onUnmounted(() => {
       <!-- 底部操作 + 进度 -->
       <n-space class="action-bar" justify="space-between" align="center">
         <n-space>
-          <n-button type="primary" :loading="converting" @click="startConversion">
-            ▶ 开始转换
+          <n-button
+            type="primary"
+            :loading="converting"
+            :disabled="converting"
+            @click="startConversion"
+          >
+            <template #icon><AppIcon name="play" :size="15" /></template>
+            开始转换
           </n-button>
-          <n-button :disabled="!batchTasks.length" @click="stopConversion">⏹ 停止</n-button>
-          <n-button @click="openOutputDir">📂 打开输出目录</n-button>
+          <n-button :disabled="!batchTasks.length" @click="stopConversion">
+            <template #icon><AppIcon name="stop" :size="14" /></template>
+            停止
+          </n-button>
+          <n-button @click="openOutputDir">
+            <template #icon><AppIcon name="folder-open" :size="15" /></template>
+            打开输出目录
+          </n-button>
         </n-space>
         <n-space v-if="batchTasks.length" vertical size="small" class="progress-block">
           <span class="progress-text">
@@ -429,6 +464,18 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.file-ico {
+  vertical-align: -2px;
+}
+.hint-ico {
+  vertical-align: -2px;
+  margin-right: 2px;
+}
 .local-hint {
   margin-bottom: 12px;
 }
@@ -470,6 +517,12 @@ onUnmounted(() => {
   margin-top: 8px;
   display: flex;
   gap: 8px;
+}
+.norm-hint {
+  display: block;
+  font-size: 12px;
+  opacity: 0.75;
+  margin-top: 4px;
 }
 .action-bar {
   margin-top: 16px;

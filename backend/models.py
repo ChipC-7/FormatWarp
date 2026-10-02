@@ -37,6 +37,10 @@ class SettingsModel(BaseModel):
         default_factory=lambda: {m: 2 for m in MODULES}
     )
     task_timeout_minutes: int = Field(0, ge=0, le=120)
+    # 超级模式：N 个转换进程，每进程内部多线程同时转换多个文件
+    super_mode: bool = False
+    super_processes: int = Field(4, ge=2, le=8)
+    super_threads: int = Field(4, ge=1, le=8)
 
 
 class OpenPathRequest(BaseModel):

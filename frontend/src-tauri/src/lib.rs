@@ -91,6 +91,8 @@ fn spawn_backend(app: &tauri::App, port: Arc<Mutex<u16>>) -> Option<CommandChild
             .args([
                 "-m", "uvicorn", "backend.app:app",
                 "--host", "127.0.0.1", "--port", "8765",
+                // 优雅关闭最多 5s，避免 WS 未断时进程无限挂起
+                "--timeout-graceful-shutdown", "5",
             ])
             .current_dir(root);
         match cmd.spawn() {

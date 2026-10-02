@@ -11,6 +11,8 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AppIcon: typeof import('./components/AppIcon.vue')['default']
+    BrandMark: typeof import('./components/BrandMark.vue')['default']
     NInputGroup: typeof import('naive-ui')['NInputGroup']
     RouterLink: typeof import('vue-router')['RouterLink']
     RouterView: typeof import('vue-router')['RouterView']

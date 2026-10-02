@@ -6,11 +6,12 @@ import {
   NTooltip,
 } from "naive-ui";
 import { useTasksStore } from "../stores/tasks";
+import AppIcon from "../components/AppIcon.vue";
 
 const tasks = useTasksStore();
 
-const MODULE_EMOJI: Record<string, string> = {
-  audio: "🎵", video: "🎬", image: "🖼️", doc: "📄",
+const MODULE_ICON: Record<string, string> = {
+  audio: "audio", video: "video", image: "image", doc: "doc",
 };
 const MODULE_NAME: Record<string, string> = {
   audio: "音频", video: "视频", image: "图片", doc: "文档",
@@ -98,7 +99,10 @@ void refresh();
 </script>
 
 <template>
-  <n-card title="📊 转换监控" class="page-card">
+  <n-card class="page-card">
+    <template #header>
+      <span class="card-title"><AppIcon name="activity" :size="18" /> 转换监控</span>
+    </template>
     <n-alert :type="activeCards.length ? 'success' : 'info'" :show-icon="false" class="status-line">
       {{ statusText }}
     </n-alert>
@@ -115,7 +119,10 @@ void refresh();
       <n-list v-else bordered>
         <n-list-item v-for="t in activeCards" :key="t.task_id" class="task-item">
           <div class="task-row">
-            <span class="task-name">{{ MODULE_EMOJI[t.module] }} {{ MODULE_NAME[t.module] }} — {{ t.filename }}</span>
+            <span class="task-name">
+              <AppIcon :name="MODULE_ICON[t.module]" :size="15" class="inline-icon" />
+              {{ MODULE_NAME[t.module] }} — {{ t.filename }}
+            </span>
             <n-progress
               type="line"
               :percentage="t.progress"
@@ -130,26 +137,42 @@ void refresh();
 
     <!-- 结果两栏 -->
     <div class="result-row">
-      <n-card title="✅ 成功文件" size="small" class="result-col">
+      <n-card size="small" class="result-col">
+        <template #header>
+          <span class="result-title success">
+            <AppIcon name="check-circle" :size="17" /> 成功文件
+          </span>
+        </template>
         <n-empty v-if="!successList.length" description="暂无成功记录" size="small" />
         <n-list v-else bordered size="small">
           <n-list-item v-for="r in successList" :key="r.task_id">
             <n-tooltip>
               <template #trigger>
-                <span class="result-line">{{ MODULE_EMOJI[r.module] }} {{ r.filename }} — {{ firstLine(r.message) }}</span>
+                <span class="result-line">
+                  <AppIcon :name="MODULE_ICON[r.module]" :size="14" class="inline-icon dim" />
+                  {{ r.filename }} — {{ firstLine(r.message) }}
+                </span>
               </template>
               {{ r.message }}
             </n-tooltip>
           </n-list-item>
         </n-list>
       </n-card>
-      <n-card title="❌ 失败文件" size="small" class="result-col">
+      <n-card size="small" class="result-col">
+        <template #header>
+          <span class="result-title failure">
+            <AppIcon name="x-circle" :size="17" /> 失败文件
+          </span>
+        </template>
         <n-empty v-if="!failureList.length" description="暂无失败记录" size="small" />
         <n-list v-else bordered size="small">
           <n-list-item v-for="r in failureList" :key="r.task_id">
             <n-tooltip>
               <template #trigger>
-                <span class="result-line">{{ MODULE_EMOJI[r.module] }} {{ r.filename }} — {{ firstLine(r.message) }}</span>
+                <span class="result-line">
+                  <AppIcon :name="MODULE_ICON[r.module]" :size="14" class="inline-icon dim" />
+                  {{ r.filename }} — {{ firstLine(r.message) }}
+                </span>
               </template>
               {{ r.message }}
             </n-tooltip>
@@ -159,13 +182,36 @@ void refresh();
     </div>
 
     <n-space class="result-actions">
-      <n-button size="small" @click="refresh">🔄 刷新</n-button>
-      <n-button size="small" @click="clearResults">🗑 清空结果</n-button>
+      <n-button size="small" @click="refresh">
+        <template #icon><AppIcon name="refresh" :size="15" /></template>
+        刷新
+      </n-button>
+      <n-button size="small" @click="clearResults">
+        <template #icon><AppIcon name="trash" :size="15" /></template>
+        清空结果
+      </n-button>
     </n-space>
   </n-card>
 </template>
 
 <style scoped>
+.card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.result-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.result-title.success { color: #34d399; }
+.result-title.failure { color: #f87171; }
+.inline-icon {
+  vertical-align: -2px;
+  flex-shrink: 0;
+}
+.inline-icon.dim { opacity: 0.8; }
 .status-line { margin-bottom: 12px; }
 .total-group { margin: 12px 0; }
 .total-info { font-size: 13px; opacity: 0.85; margin-bottom: 6px; }

@@ -126,6 +126,12 @@ export interface Settings {
   default_output_dir: string;
   max_parallel: ParallelMap;
   task_timeout_minutes: number;
+  /** 超级模式：开启后转换任务以多进程执行 */
+  super_mode: boolean;
+  /** 超级模式转换进程数（2-8） */
+  super_processes: number;
+  /** 每个转换进程同时转换的文件数（1-8） */
+  super_threads: number;
 }
 
 // ---------- 日志 ----------

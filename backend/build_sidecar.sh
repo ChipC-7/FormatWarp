@@ -42,6 +42,13 @@ echo "==> 打包工具: ${BUILD_TOOL}"
 command -v rustc >/dev/null 2>&1 || echo "!! 未检测到 rustc（Tauri 依赖），仅能猜测三元组"
 python3 -c "import PySide6" 2>/dev/null || true   # 忽略：不参与打包
 
+# 确保内置 pandoc 已就绪（用户无需自行安装）
+PANDOC_BIN="${PROJECT_ROOT}/backend/resources/pandoc/pandoc"
+if [ ! -f "${PANDOC_BIN}" ]; then
+  echo "==> 未找到内置 pandoc，执行下载脚本…"
+  python3 "${PROJECT_ROOT}/scripts/fetch_pandoc.py"
+fi
+
 case "${BUILD_TOOL}" in
   pyinstaller)
     python3 -c "import PyInstaller" >/dev/null 2>&1 || {
@@ -50,6 +57,7 @@ case "${BUILD_TOOL}" in
     rm -rf build dist "${TARGET_DIR}/${BIN_NAME}"
     # --collect-all av / PIL：把 PyAV 与 Pillow 的二进制库与数据一并收集
     # --collect-submodules backend：收集 backend 包（含 engines）
+    # --add-data：内置 pandoc 打包到 resources/pandoc（运行时解析 sys._MEIPASS）
     # 入口用 sidecar_entry.py（绝对导入，绕开 app.py 相对导入在冻结环境的限制）
     python3 -m PyInstaller \
       --onefile \
@@ -57,6 +65,7 @@ case "${BUILD_TOOL}" in
       --collect-all av \
       --collect-all PIL \
       --collect-submodules backend \
+      --add-data "${PROJECT_ROOT}/backend/resources/pandoc:resources/pandoc" \
       --paths "${PROJECT_ROOT}" \
       --noupx \
       backend/sidecar_entry.py
@@ -73,6 +82,7 @@ case "${BUILD_TOOL}" in
       --include-package=av \
       --include-package=backend \
       --include-package=backend.engines \
+      --include-data-files="${PANDOC_BIN}=resources/pandoc/pandoc" \
       --nofollow-import-to=PySide6 \
       --noinclude-default-mode=nofollow \
       backend/sidecar_entry.py

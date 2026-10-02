@@ -7,6 +7,7 @@ import type { EngineStatus, HealthResponse } from "../types/backend";
 export const useEngineStore = defineStore("engine", () => {
   const status = ref<EngineStatus | null>(null);
   const diskFreeGb = ref(0);
+  const version = ref("3.1.0");
   const lastCheckAt = ref<number>(0);
 
   /** 从健康接口刷新引擎状态 */
@@ -15,6 +16,7 @@ export const useEngineStore = defineStore("engine", () => {
       const h = await apiGet<HealthResponse>("/api/health");
       status.value = h.engines;
       diskFreeGb.value = h.disk_free_gb;
+      version.value = h.version ?? version.value;
       lastCheckAt.value = Date.now();
     } catch {
       /* 后端未连接时保留上次状态 */
@@ -27,5 +29,5 @@ export const useEngineStore = defineStore("engine", () => {
     lastCheckAt.value = Date.now();
   }
 
-  return { status, diskFreeGb, lastCheckAt, refresh, applyEngine };
+  return { status, diskFreeGb, version, lastCheckAt, refresh, applyEngine };
 });
