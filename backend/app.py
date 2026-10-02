@@ -32,7 +32,7 @@ from .engines import audio_engine, video_engine, image_engine, doc_engine
 
 import av_engine  # 项目根目录的 av_engine（backend.engines.__init__ 已加 sys.path）
 
-APP_VERSION = "3.1.0"
+APP_VERSION = "3.1.1"
 
 # =====================================================================
 # 引擎探测
