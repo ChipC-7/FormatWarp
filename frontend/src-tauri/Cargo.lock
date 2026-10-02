@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "frontend"
-version = "3.0.0"
+version = "3.1.1"
 dependencies = [
  "serde",
  "serde_json",

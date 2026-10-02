@@ -7,7 +7,7 @@ import type { EngineStatus, HealthResponse } from "../types/backend";
 export const useEngineStore = defineStore("engine", () => {
   const status = ref<EngineStatus | null>(null);
   const diskFreeGb = ref(0);
-  const version = ref("3.1.0");
+  const version = ref("3.1.1");
   const lastCheckAt = ref<number>(0);
 
   /** 从健康接口刷新引擎状态 */
