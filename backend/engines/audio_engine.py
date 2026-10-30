@@ -38,6 +38,7 @@ SUPPORTED_AUDIO_FORMATS = {
 INPUT_AUDIO_FORMATS = [
     "mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "opus",
     "aiff", "aif", "amr", "ape", "au", "ac3", "dts", "tta", "wv", "mp2", "spx",
+    "dsf",
 ]
 
 BITRATE_PRESETS = {

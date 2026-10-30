@@ -24,16 +24,16 @@ from ..resources_resolver import find_bundled
 # 格式预设表（沿用旧 doc_converter.py）
 # =====================================================================
 
+# 说明：仅列入引擎链确实能处理的格式。旧 Office 二进制格式 doc/xls/ppt
+# 五级引擎均不支持（python-pptx 拒读 .ppt，pandoc 不支持 .doc/.xls），
+# 故不列入输入/输出列表（需转换这些格式请先用 LibreOffice 另存为新格式）。
 SUPPORTED_DOC_FORMATS = {
     "pdf":     {"ext": ".pdf",  "desc": "PDF — 通用电子文档（跨平台首选）"},
     "docx":    {"ext": ".docx", "desc": "DOCX — Microsoft Word 现代格式"},
-    "doc":     {"ext": ".doc",  "desc": "DOC — 旧版 Word（建议转 DOCX）"},
     "odt":     {"ext": ".odt",  "desc": "ODT — 开放文档文本文档"},
     "xlsx":    {"ext": ".xlsx", "desc": "XLSX — Microsoft Excel 现代表格"},
-    "xls":     {"ext": ".xls",  "desc": "XLS — 旧版 Excel（建议转 XLSX）"},
     "csv":     {"ext": ".csv",  "desc": "CSV — 逗号分隔值表格"},
     "pptx":    {"ext": ".pptx", "desc": "PPTX — Microsoft PowerPoint 现代演示"},
-    "ppt":     {"ext": ".ppt",  "desc": "PPT — 旧版 PowerPoint"},
     "txt":     {"ext": ".txt",  "desc": "TXT — 纯文本"},
     "md":      {"ext": ".md",   "desc": "Markdown — 轻量标记语言"},
     "html":    {"ext": ".html", "desc": "HTML — 网页格式"},

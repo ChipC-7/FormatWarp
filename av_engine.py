@@ -38,6 +38,8 @@ FORMAT_CONTAINER_MAP: Dict[str, str] = {
     "webm": "webm", "flv": "flv", "ts": "mpegts", "m2ts": "mpegts",
     "wmv": "asf", "mpg": "mpeg", "vob": "mpeg", "m4v": "mp4",
     "3gp": "3gp", "ogv": "ogg", "asf": "asf", "gif": "gif",
+    # AV1 是编码格式，复用 MP4/MKV 容器
+    "av1": "mp4",
     # 音频
     "mp3": "mp3", "wav": "wav", "flac": "flac",
     "aac": "adts", "ogg": "ogg", "opus": "opus", "m4a": "mp4",
@@ -82,9 +84,15 @@ AUDIO_CODEC_FORMAT: Dict[str, str] = {
 }
 
 # 视频软件编码器（按输出格式）
+# 注意编码器必须与容器匹配：MPEG-PS(mpg/vob) 不接受 H.264，ASF 习惯用 WMV，
+# 若错配会产出"扩展名对、内容却无法播放"的损坏文件。
 SOFT_VIDEO_CODEC: Dict[str, str] = {
     "webm": "libvpx-vp9",
     "ogv": "libvpx-vp9",
+    "wmv": "wmv2",
+    "mpg": "mpeg2video",
+    "vob": "mpeg2video",
+    "av1": "libsvtav1",
 }
 
 # 视频硬件加速：hardware_accel key -> (编码器, 设备类型, 显示名)
@@ -659,6 +667,12 @@ def _video_to_gif(task, progress_cb: Callable[[int], None],
         vstream = src.streams.video[0]
         width = vstream.codec_context.width or 640
         height = vstream.codec_context.height or 360
+        # 输出宽度固定 480，高度按源宽高比换算并取偶数
+        # （paletteuse 与 yuv 滤镜要求偶数尺寸；原先写死 480x270 会使非 16:9 画面变形）
+        gif_w = 480
+        gif_h = max(2, int(round(height * gif_w / width)))
+        if gif_h % 2:
+            gif_h += 1
         fps_num = vstream.average_rate.numerator if vstream.average_rate else 25
         fps_den = vstream.average_rate.denominator if vstream.average_rate else 1
         fps = fps_num / fps_den if fps_den else 25.0
@@ -679,7 +693,7 @@ def _video_to_gif(task, progress_cb: Callable[[int], None],
         # ---- 第 1 遍：palettegen ----
         g1 = Graph()
         buf1 = g1.add("buffer", src_args)
-        scale1 = g1.add("scale", "480:-1")
+        scale1 = g1.add("scale", f"{gif_w}:{gif_h}")
         fps1 = g1.add("fps", "15")
         pal_node = g1.add("palettegen", "stats_mode=diff")
         sink1 = g1.add("buffersink")
@@ -708,13 +722,13 @@ def _video_to_gif(task, progress_cb: Callable[[int], None],
         # ---- 第 2 遍：paletteuse → gif 编码 ----
         dst = av.open(task.output_path, mode="w", format="gif")
         gstream = dst.add_stream("gif", rate=15)
-        gstream.width = 480
-        gstream.height = 270
+        gstream.width = gif_w
+        gstream.height = gif_h
         gstream.pix_fmt = "pal8"
 
         g2 = Graph()
         buf2 = g2.add("buffer", src_args)
-        scale2 = g2.add("scale", "480:-1")
+        scale2 = g2.add("scale", f"{gif_w}:{gif_h}")
         fps2 = g2.add("fps", "15")
         palbuf = g2.add(
             "buffer",
@@ -805,7 +819,15 @@ def _video_transcode(task, container_name: str, video_codec: str,
             out_video = dst.add_stream(video_codec, rate=rate, **kwargs)
             out_video.width = vctx.width
             out_video.height = vctx.height
-            out_video.pix_fmt = vctx.pix_fmt
+            # 仅继承主流编码器普遍支持的 YUV 平面格式；bgra/rgb24/pal8 等
+            # 若强加给编码器会导致 avcodec_open2 失败（如 GIF 的 bgra → libx264），
+            # 这类情况不设 pix_fmt，PyAV 会在 encode 时自动重格式化到编码器默认格式。
+            _COMPATIBLE_PIX_FMTS = {
+                "yuv420p", "yuv422p", "yuv444p",
+                "yuv420p10le", "yuv422p10le", "yuv444p10le",
+            }
+            if vctx.pix_fmt in _COMPATIBLE_PIX_FMTS:
+                out_video.pix_fmt = vctx.pix_fmt
             if video_codec == "h264_nvenc":
                 out_video.options = {"preset": "p4", "rc": "vbr"}
                 if getattr(task, "video_bitrate", None):
@@ -815,13 +837,19 @@ def _video_transcode(task, container_name: str, video_codec: str,
             elif getattr(task, "video_bitrate", None):
                 out_video.bit_rate = _bitrate_to_int(task.video_bitrate)
             else:
-                # 恒定质量：mp4/mkv/mov 用 CRF；webm 用 libvpx-vp9 恒定质量
+                # 恒定质量/默认参数：按编码器区分参数名（错配会直接编码失败）
                 if video_codec == "libvpx-vp9":
                     out_video.options = {"crf": "30", "b": "0"}
+                elif video_codec == "libsvtav1":
+                    # SVT-AV1：crf 范围 0-63，preset 为数字
+                    out_video.options = {"crf": "28", "preset": "8"}
+                elif video_codec in ("wmv2", "mpeg2video"):
+                    # 这两个老式编码器无 CRF 模式，不设选项即使用默认高质量
+                    pass
                 else:
                     out_video.options = {"crf": "23", "preset": "medium"}
-            if vctx.format:
-                out_video.format = vctx.format  # PyAV 18：视频 format 需传 VideoFormat 对象
+            if vctx.pix_fmt in _COMPATIBLE_PIX_FMTS and vctx.format:
+                out_video.format = vctx.format  # 仅随 YUV 继承，避免把 bgra 等格式强加给编码器
 
         out_audio = None
         if astream is not None:
@@ -942,7 +970,12 @@ def convert_video(task, progress_cb: Callable[[int], None],
         return _video_to_gif(task, progress_cb, should_abort_cb)
 
     # 无任何参数修改时尝试流直拷
-    if not getattr(task, "video_bitrate", None) and not getattr(task, "audio_bitrate", None):
+    # 但 wmv/mpg/vob/av1 的目标语义就是"特定编码器"：流直拷会保留源编码
+    # （如源 H.264 → .wmv 文件里仍是 H.264），与用户选择的格式不符，故跳过直拷强制重编码。
+    _FORCE_REENCODE_FORMATS = {"wmv", "mpg", "vob", "av1"}
+    if (not getattr(task, "video_bitrate", None)
+            and not getattr(task, "audio_bitrate", None)
+            and out_fmt not in _FORCE_REENCODE_FORMATS):
         ok, msg = _video_stream_copy(task, container_name)
         if ok:
             return True, msg
@@ -950,6 +983,14 @@ def convert_video(task, progress_cb: Callable[[int], None],
     # 决定硬件编码器
     hw_key = getattr(task, "hardware_accel", None)
     if hw_key == "cpu":
+        hw_key = None
+    # 硬件编码器（GPU_ENCODER_MAP）全部产出 H.264，仅对兼容 H.264 的容器开放。
+    # WebM/OGV(VP9)、WMV(WMV2)、MPG/VOB(MPEG2)、AV1(SVT-AV1)、GIF 都不接受 H.264，
+    # 若错配会产出"扩展名对、内容无法播放"的损坏文件，这些格式一律软件编码。
+    _HW_COMPATIBLE_FORMATS = {
+        "mp4", "mkv", "mov", "avi", "flv", "ts", "m2ts", "m4v", "3gp", "f4v",
+    }
+    if out_fmt not in _HW_COMPATIBLE_FORMATS:
         hw_key = None
     if hw_key is None:
         # 自动：检测到 GPU 编码器则尝试，否则纯 CPU

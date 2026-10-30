@@ -33,11 +33,12 @@ SUPPORTED_VIDEO_FORMATS = {
     "asf":  {"ext": ".asf",  "desc": "ASF (Advanced Systems Format)"},
     "m2ts": {"ext": ".m2ts", "desc": "M2TS (蓝光 MPEG-2 TS)"},
     "gif":  {"ext": ".gif",  "desc": "GIF (视频转动图 ⚡)"},
+    "av1":  {"ext": ".mp4",  "desc": "AV1 — 新一代高效编码 (MP4 容器)"},
 }
 
 INPUT_VIDEO_FORMATS = [
     "mp4", "mkv", "avi", "mov", "webm", "flv", "ts", "wmv", "mpg", "mpeg", "m4v",
-    "3gp", "ogv", "vob", "asf", "m2ts", "rmvb", "rm", "divx", "f4v",
+    "3gp", "ogv", "vob", "asf", "m2ts", "rmvb", "rm", "divx", "f4v", "gif",
 ]
 
 VIDEO_BITRATE_PRESETS = {

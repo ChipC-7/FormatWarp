@@ -5,13 +5,18 @@
 从旧 image_converter.py 剥离的纯函数版本：
   - 保留了 SUPPORTED_IMAGE_FORMATS / INPUT_IMAGE_FORMATS / QUALITY_PRESETS /
     SCALE_MODE_PRESETS / FORMAT_PIL_SAVE_KWARGS_MAP / FORMAT_TO_PIL 等预设表；
-  - 删除了 _PIL_SUBPROCESS_TEMPLATE（外部 Python 子进程方案）与 FFmpeg 兜底，
-    只保留本地 Pillow 主路径；
+  - SVG 输入先由 cairosvg 光栅化为 PNG，再统一走 Pillow 主流程（可输出任意位图）；
+  - 相机 RAW（dng/nef/cr2/arw/orf/rw2）由 rawpy 解码；JPEG XL 由 pillow-jxl-plugin 支持；
+  - 位图 → SVG 由 vtracer 矢量描摹；动图 → PNG 输出保留为 APNG 动画；
+  - 删除了 _PIL_SUBPROCESS_TEMPLATE（外部 Python 子进程方案）与 FFmpeg 兜底；
   - convert_image(task, progress_cb, should_abort_cb) 与旧 Worker 的
     _convert_single_pil_local 行为一致，返回 (bool, message)。
 """
 
+import io
 import os
+import shutil
+import tempfile
 from typing import Callable, Optional, Tuple
 
 # =====================================================================
@@ -27,12 +32,19 @@ SUPPORTED_IMAGE_FORMATS = {
     "tiff": {"ext": ".tiff", "desc": "TIFF — 印刷级无损压缩", "need_quality": True},
     "ico":  {"ext": ".ico",  "desc": "ICO — Windows 图标", "need_quality": False},
     "avif": {"ext": ".avif", "desc": "AVIF — 新一代 AV1 压缩 (体积最小)", "need_quality": True},
+    "jxl":  {"ext": ".jxl",  "desc": "JPEG XL — 新一代高效压缩 (有损/无损)", "need_quality": True},
+    "svg":  {"ext": ".svg",  "desc": "SVG — 矢量图 (位图描摹生成)", "need_quality": False},
 }
 
+# RAW 相机格式扩展名（由 rawpy/LibRaw 解码）
+RAW_INPUT_EXTS = {"dng", "nef", "cr2", "arw", "orf", "rw2"}
+
+# RAW 相机格式（dng/nef/cr2/arw/orf/rw2）已暂时从输入列表撤下：
+# rawpy 集成代码就位但未经真实 RAW 实证，验证通过后再开放（避免能选必失败）。
 INPUT_IMAGE_FORMATS = [
     "png", "jpg", "jpeg", "jfif", "jpe", "webp", "bmp", "gif", "tif", "tiff",
-    "ico", "ppm", "pgm", "pbm", "tga", "svg", "heic", "heif", "avif", "eps",
-    "psd", "dng", "nef", "cr2", "arw", "orf", "rw2", "pcx", "xbm", "xpm",
+    "ico", "ppm", "pgm", "pbm", "tga", "svg", "heic", "heif", "avif", "jxl",
+    "psd", "pcx", "xbm", "xpm",
 ]
 
 QUALITY_PRESETS = [
@@ -64,12 +76,13 @@ FORMAT_PIL_SAVE_KWARGS_MAP = {
     "gif":  lambda q: {"optimize": True},
     "ico":  lambda q: {},
     "avif": lambda q: {"quality": q, "speed": 5},
+    "jxl":  lambda q: {"lossless": True} if q >= 100 else {"quality": q},
 }
 
 FORMAT_TO_PIL = {
     "jpeg": "JPEG", "jpg": "JPEG", "png": "PNG", "webp": "WEBP",
     "bmp": "BMP", "gif": "GIF", "tiff": "TIFF", "tif": "TIFF",
-    "ico": "ICO", "avif": "AVIF",
+    "ico": "ICO", "avif": "AVIF", "jxl": "JXL",
 }
 
 
@@ -84,6 +97,65 @@ def pillow_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _is_svg(path: str) -> bool:
+    """判断输入是否为 SVG：先看扩展名，再嗅探文件开头的 <svg 标记。"""
+    if path.lower().endswith(".svg"):
+        return True
+    try:
+        with open(path, "rb") as f:
+            head = f.read(512).lstrip()
+    except OSError:
+        return False
+    return head.startswith(b"<svg") or b"<svg" in head[:300]
+
+
+def _render_svg_png(path: str) -> bytes:
+    """用 cairosvg 把 SVG 按其原生尺寸渲染为 PNG 字节。"""
+    try:
+        import cairosvg
+    except Exception as e:
+        raise RuntimeError(
+            "SVG 转换需要 cairosvg 及系统 libcairo，请先安装：pip install cairosvg"
+        ) from e
+    with open(path, "rb") as f:
+        data = f.read()
+    try:
+        return cairosvg.svg2png(bytestring=data)
+    except Exception as e:
+        raise RuntimeError(f"SVG 渲染失败（文件可能包含不支持的特性）：{e}") from e
+
+
+def _is_raw(path: str) -> bool:
+    """判断输入是否为相机 RAW。"""
+    return os.path.splitext(path)[1].lower().lstrip(".") in RAW_INPUT_EXTS
+
+
+def _load_raw_image(path: str):
+    """用 rawpy（LibRaw）解码 RAW 为 Pillow Image。"""
+    try:
+        import rawpy
+    except Exception as e:
+        raise RuntimeError("RAW 转换需要 rawpy：pip install rawpy") from e
+    try:
+        with rawpy.imread(path) as raw:
+            rgb = raw.postprocess()  # RGB ndarray（含白平衡、去马赛克）
+    except Exception as e:
+        raise RuntimeError(f"RAW 解码失败：{e}") from e
+    return Image.fromarray(rgb)
+
+
+def _bitmap_to_svg(input_path: str, output_path: str) -> None:
+    """用 vtracer 把位图文件矢量描摹为 SVG 文件。"""
+    try:
+        import vtracer
+    except Exception as e:
+        raise RuntimeError("位图转 SVG 需要 vtracer：pip install vtracer") from e
+    try:
+        vtracer.convert_image_to_svg_py(input_path, output_path)
+    except Exception as e:
+        raise RuntimeError(f"矢量描摹失败：{e}") from e
 
 
 def _apply_scale(img, scale_mode):
@@ -141,27 +213,84 @@ def convert_image(task, progress_cb: Callable[[int], None],
     except Exception as e:
         return False, f"Pillow 未安装: {e}"
 
+    # 注册 JPEG XL 插件（可选依赖，缺失时仅 JXL 转换报错，不影响其他格式）
+    try:
+        import pillow_jxl  # noqa: F401
+    except Exception:
+        pass
+
     progress_cb(5)
     if should_abort_cb():
         _delete_partial(getattr(task, "output_path", ""))
         return False, "用户取消"
 
+    output_format = (task.output_format or "").lower()
+    save_dir = os.path.dirname(task.output_path)
+    if save_dir and not os.path.isdir(save_dir):
+        os.makedirs(save_dir, exist_ok=True)
+
     try:
-        with Image.open(task.input_path) as img:
-            img.load()
+        # ---- SVG 输出：位图 → 矢量描摹（RAW 先转临时 PNG）----
+        if output_format == "svg":
+            if _is_svg(task.input_path):
+                shutil.copyfile(task.input_path, task.output_path)
+                progress_cb(100)
+                return True, "源已是 SVG，直接复制"
+            tmp_png = None
+            try:
+                if _is_raw(task.input_path):
+                    tmp_png = os.path.join(tempfile.mkdtemp(), "raw_render.png")
+                    _load_raw_image(task.input_path).save(tmp_png)
+                    src_for_trace = tmp_png
+                else:
+                    src_for_trace = task.input_path
+                _bitmap_to_svg(src_for_trace, task.output_path)
+            finally:
+                if tmp_png:
+                    shutil.rmtree(os.path.dirname(tmp_png), ignore_errors=True)
+            progress_cb(100)
+            return True, "位图 → SVG（vtracer 矢量描摹）"
+
+        # ---- 打开输入：RAW / SVG / 普通位图 ----
+        if _is_raw(task.input_path):
+            img_ctx = _load_raw_image(task.input_path)
+        elif _is_svg(task.input_path):
+            img_ctx = Image.open(io.BytesIO(_render_svg_png(task.input_path)))
+        else:
+            img_ctx = Image.open(task.input_path)
+        with img_ctx:
+            img_ctx.load()
             exif_bytes = None
             if getattr(task, "keep_exif", True):
                 try:
-                    exif_bytes = img.info.get("exif") or img.getexif().tobytes() or None
+                    exif_bytes = img_ctx.info.get("exif") or img_ctx.getexif().tobytes() or None
                 except Exception:
                     exif_bytes = None
 
-            img = _apply_scale(img, getattr(task, "scale_mode", None))
+            # ---- 动图 → PNG：保留全部帧输出 APNG ----
+            if output_format == "png" and getattr(img_ctx, "is_animated", False):
+                frames, durations = [], []
+                for fi in range(getattr(img_ctx, "n_frames", 1)):
+                    img_ctx.seek(fi)
+                    frame = img_ctx.convert("RGBA")
+                    frame = _apply_scale(frame, getattr(task, "scale_mode", None))
+                    frames.append(frame)
+                    durations.append(img_ctx.info.get("duration", 100))
+                    if should_abort_cb():
+                        _delete_partial(getattr(task, "output_path", ""))
+                        return False, "用户取消"
+                frames[0].save(
+                    task.output_path, format="PNG", save_all=True,
+                    append_images=frames[1:], duration=durations, loop=0,
+                    optimize=True, compress_level=6)
+                progress_cb(100)
+                return True, f"动图 → APNG（{len(frames)} 帧）"
+
+            img = _apply_scale(img_ctx, getattr(task, "scale_mode", None))
             if should_abort_cb():
                 _delete_partial(getattr(task, "output_path", ""))
                 return False, "用户取消"
 
-            output_format = (task.output_format or "").lower()
             pil_fmt = FORMAT_TO_PIL.get(output_format, output_format.upper())
 
             if img.mode not in ("RGB", "RGBA", "L", "LA", "P", "1"):
@@ -186,10 +315,6 @@ def convert_image(task, progress_cb: Callable[[int], None],
             if exif_bytes and pil_fmt in ("JPEG", "WEBP", "PNG", "TIFF"):
                 kwargs["exif"] = exif_bytes
 
-            save_dir = os.path.dirname(task.output_path)
-            if save_dir and not os.path.isdir(save_dir):
-                os.makedirs(save_dir, exist_ok=True)
-
             if should_abort_cb():
                 _delete_partial(getattr(task, "output_path", ""))
                 return False, "用户取消"
@@ -200,7 +325,7 @@ def convert_image(task, progress_cb: Callable[[int], None],
             return True, f"成功 → 格式: {pil_fmt}  大小: {out_size/1024:.1f} KB (Pillow 本地)"
     except Exception as e:
         _delete_partial(getattr(task, "output_path", ""))
-        return False, f"Pillow 转换失败: {e}"
+        return False, f"图片转换失败: {e}"
 
 
 # =====================================================================
