@@ -39,6 +39,13 @@ SUPPORTED_DOC_FORMATS = {
     "html":    {"ext": ".html", "desc": "HTML — 网页格式"},
     "rtf":     {"ext": ".rtf",  "desc": "RTF — 富文本格式"},
     "epub":    {"ext": ".epub", "desc": "EPUB — 电子书标准格式"},
+    "rst":     {"ext": ".rst",  "desc": "RST — reStructuredText 技术文档"},
+    "latex":   {"ext": ".tex",  "desc": "LaTeX — 排版源文件（.tex）"},
+    "json":    {"ext": ".json", "desc": "JSON — Pandoc 结构化文档"},
+    "mediawiki": {"ext": ".wiki", "desc": "MediaWiki — Wiki 标记"},
+    "asciidoc": {"ext": ".adoc", "desc": "AsciiDoc — 技术文档标记"},
+    "org":     {"ext": ".org",  "desc": "Org — Emacs Org-mode 文档"},
+    "typst":   {"ext": ".typ",  "desc": "Typst — 现代排版语言"},
 }
 
 EXTRA_INPUT_EXTS = [
@@ -52,8 +59,37 @@ ALL_INPUT_EXTS = set(
         ".tex", ".json", ".xml", ".yaml", ".yml", ".ini", ".log", ".py",
         ".js", ".ts", ".c", ".cpp", ".h", ".mdx", ".odp", ".ods", ".epub",
         ".sxc", ".wri", ".wpd", ".pages", ".numbers",
+        ".wiki", ".adoc", ".typ", ".org",
     ]]
 )
+
+# 原生纯文本路径与 pandoc 路径的格式集合（预检和实际转换共用，避免漂移）
+PURE_TEXT_SRCS = {
+    "txt", "md", "markdown", "html", "htm", "rtf", "csv", "tsv",
+    "json", "xml", "yaml", "yml", "ini", "log", "py", "js", "ts",
+    "c", "cpp", "h", "mdx",
+}
+PURE_TEXT_DSTS = {"txt", "md", "html", "htm", "csv", "tsv"}
+
+# pandoc 3.x 实际支持的本项目相关格式（xlsx/csv/tsv/pptx 也支持读取）
+PANDOC_INPUTS = {
+    "md", "markdown", "html", "htm", "docx", "odt", "epub",
+    "rst", "latex", "tex", "rtf", "txt", "json", "mediawiki",
+    "t2t", "org", "wiki", "pptx", "xlsx", "csv", "tsv",
+    "asciidoc", "adoc", "typst", "typ",
+}
+PANDOC_OUTPUTS = {
+    "md", "markdown", "html", "htm", "docx", "odt", "epub",
+    "rst", "latex", "tex", "rtf", "txt", "json", "mediawiki",
+    "pptx", "asciidoc", "org", "typst",
+    "pdf",  # 需配合 LaTeX 引擎（如 tectonic / xelatex）
+}
+
+# 只能依赖 pandoc 输出的格式（无原生 Python 引擎路径）
+PANDOC_ONLY_OUTPUTS = {
+    "odt", "epub", "rtf", "rst", "latex", "json", "mediawiki",
+    "asciidoc", "org", "typst",
+}
 
 
 # =====================================================================
@@ -175,6 +211,170 @@ def probe() -> dict:
     }
 
 
+_CAPABILITY_CACHE: Optional[dict] = None
+
+
+def _engine_snapshot() -> dict:
+    """探测并缓存当前进程可用的文档引擎（供能力预检复用）。"""
+    global _CAPABILITY_CACHE
+    if _CAPABILITY_CACHE is None:
+        flags, errors = _probe_native_engines()
+        _CAPABILITY_CACHE = {
+            "native": flags,
+            "native_errors": errors,
+            "pandoc": _find_pandoc(),
+            "wkhtmltopdf": _find_wkhtmltopdf(),
+            "latex": shutil.which("tectonic") or shutil.which("xelatex"),
+        }
+    return _CAPABILITY_CACHE
+
+
+def check_output_supported(output_format: str) -> Optional[str]:
+    """检查某个文档输出格式在当前环境是否至少存在一条可用引擎路径。
+
+    返回 None 表示可输出；否则返回中文原因，供 /api/formats 置灰提示。
+    该检查是“输出格式级”的，具体输入组合再由 check_conversion_supported
+    在提交任务时精确判断。
+    """
+    fmt = (output_format or "").lower()
+    if fmt not in SUPPORTED_DOC_FORMATS:
+        return f"未知文档输出格式：{fmt}"
+
+    snap = _engine_snapshot()
+    native = snap["native"]
+    pandoc = snap["pandoc"]
+
+    if fmt == "pdf":
+        if (native.get("PIL") or native.get("weasyprint")
+                or snap["wkhtmltopdf"] or (pandoc and snap["latex"])):
+            return None
+        return (
+            "当前环境缺少生成 PDF 的引擎：\n"
+            "👉 需要 Pillow（图片→PDF）、weasyprint/wkhtmltopdf（HTML→PDF），"
+            "或 pandoc + tectonic/xelatex。"
+        )
+    if fmt == "xlsx":
+        if native.get("openpyxl"):
+            return None
+        return "XLSX 输出仅支持 CSV→XLSX，当前缺少 openpyxl（pip install openpyxl）。"
+    if fmt == "pptx":
+        if pandoc:
+            return None
+        return "PPTX 输出依赖 pandoc，当前未检测到 pandoc。"
+    if fmt == "docx":
+        if pandoc or native.get("pdf2docx"):
+            return None
+        return "DOCX 输出需要 pandoc（通用转换）或 pdf2docx（PDF→DOCX）。"
+    if fmt in PANDOC_ONLY_OUTPUTS:
+        if pandoc:
+            return None
+        return f"{fmt.upper()} 输出依赖 pandoc，当前未检测到 pandoc。"
+    # txt/md/html/csv 可以由文本复制路径或原生库处理
+    return None
+
+
+def check_conversion_supported(input_path: str, output_format: str) -> Optional[str]:
+    """按实际输入扩展名 + 输出格式做组合预检，避免任务提交后必然失败。"""
+    reason = check_output_supported(output_format)
+    if reason:
+        return reason
+
+    fmt = (output_format or "").lower()
+    src_ext = os.path.splitext(input_path)[1].lower().lstrip(".")
+    if src_ext not in ALL_INPUT_EXTS:
+        return f"不支持的文档输入格式：{src_ext or '(无扩展名)'}"
+
+    snap = _engine_snapshot()
+    native = snap["native"]
+    pandoc = snap["pandoc"]
+    pandoc_ok = bool(pandoc) and src_ext in PANDOC_INPUTS
+    # RTF 只走 striprtf→TXT 或 pandoc，不参与纯文本直拷贝
+    text_ok = src_ext in PURE_TEXT_SRCS and not (
+        src_ext.startswith("rtf") and fmt != "txt"
+    )
+
+    if fmt == "pdf":
+        # 图片→PDF：只声明常见位图；SVG/HEIC/RAW 等依赖额外插件，保守置灰
+        raster = {"jpg", "jpeg", "jfif", "png", "webp", "bmp", "gif",
+                  "tif", "tiff", "ico", "tga", "ppm", "pgm", "pbm",
+                  "pcx", "xbm", "xpm", "psd"}
+        if src_ext in raster and native.get("PIL"):
+            return None
+        if src_ext in ("html", "htm") and (
+                native.get("weasyprint") or snap["wkhtmltopdf"]):
+            return None
+        if pandoc_ok and snap["latex"]:
+            return None
+        return (
+            f"当前引擎无法把 {src_ext or '该格式'} 转为 PDF：\n"
+            "👉 图片输入需要 Pillow；HTML 输入需要 weasyprint/wkhtmltopdf；"
+            "其他文档需要 pandoc + tectonic/xelatex。"
+        )
+
+    if fmt == "xlsx":
+        if src_ext == "csv" and native.get("openpyxl"):
+            return None
+        return "XLSX 输出仅支持 CSV → XLSX，且需要 openpyxl。"
+
+    if fmt == "csv":
+        if src_ext == "xlsx" and native.get("openpyxl"):
+            return None
+        if text_ok:
+            return None
+        return "CSV 输出仅支持文本类输入，或 XLSX→CSV（需 openpyxl）。"
+
+    if fmt == "docx":
+        if src_ext == "pdf" and native.get("pdf2docx"):
+            return None
+        if pandoc_ok:
+            return None
+        return (
+            f"当前引擎无法把 {src_ext or '该格式'} 转为 DOCX：\n"
+            "👉 PDF 输入需要 pdf2docx；其他格式需要 pandoc。"
+        )
+
+    if fmt == "pptx":
+        if pandoc_ok:
+            return None
+        return f"当前引擎无法把 {src_ext or '该格式'} 转为 PPTX：需要 pandoc 且输入格式受 pandoc 支持。"
+
+    if fmt in PANDOC_ONLY_OUTPUTS:
+        if pandoc_ok:
+            return None
+        return f"当前引擎无法把 {src_ext or '该格式'} 转为 {fmt.upper()}：需要 pandoc 且输入格式受 pandoc 支持。"
+
+    if fmt == "txt":
+        if pandoc_ok:
+            return None
+        if src_ext == "docx" and (
+                native.get("docx2txt") or native.get("python_docx")):
+            return None
+        if src_ext == "pdf" and (native.get("fitz") or native.get("pypdf")):
+            return None
+        if src_ext == "pptx" and native.get("python_pptx"):
+            return None
+        if src_ext == "rtf" and native.get("striprtf"):
+            return None
+        if text_ok:
+            return None
+        return (
+            f"当前引擎无法把 {src_ext or '该格式'} 转为 TXT：\n"
+            "👉 需要 pandoc，或对应原生读取库。"
+        )
+
+    if fmt in ("md", "html"):
+        if pandoc_ok or text_ok:
+            return None
+        if fmt == "html" and src_ext in ("md", "markdown") and native.get("markdown"):
+            return None
+        return (
+            f"当前引擎无法把 {src_ext or '该格式'} 转为 {fmt.upper()}：\n"
+            "👉 需要 pandoc，或从文本类输入直接转换。"
+        )
+
+    return None
+
+
 # =====================================================================
 # 文档引擎
 # =====================================================================
@@ -226,10 +426,8 @@ class DocEngine:
         src, dst, fmt = task.input_path, task.output_path, task.output_format.lower()
         src_ext = os.path.splitext(src)[1].lower().lstrip(".")
 
-        pure_text_srcs = {"txt", "md", "markdown", "html", "htm", "rtf", "csv", "tsv",
-                          "json", "xml", "yaml", "yml", "ini", "log", "py", "js", "ts",
-                          "c", "cpp", "h", "mdx", "yaml"}
-        pure_text_dsts = {"txt", "md", "html", "htm", "csv", "tsv"}
+        pure_text_srcs = PURE_TEXT_SRCS
+        pure_text_dsts = PURE_TEXT_DSTS
         if (src_ext in pure_text_srcs or fmt in pure_text_dsts) and not (src_ext.startswith("rtf") and fmt not in {"txt"}):
             # RTF → 文本，走 striprtf
             if src_ext == "rtf" and fmt == "txt" and self.native.get("striprtf"):
@@ -517,16 +715,8 @@ class DocEngine:
         save_dir = os.path.dirname(dst)
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
-        pandoc_inputs = {
-            "md", "markdown", "html", "htm", "docx", "odt", "epub",
-            "rst", "latex", "tex", "rtf", "txt", "json", "mediawiki",
-            "t2t", "org", "wiki",
-        }
-        pandoc_outputs = {
-            "md", "markdown", "html", "htm", "docx", "odt", "epub",
-            "rst", "latex", "tex", "rtf", "txt", "json", "mediawiki",
-            "pdf",  # 需配合 LaTeX 引擎（如 tectonic / xelatex）
-        }
+        pandoc_inputs = PANDOC_INPUTS
+        pandoc_outputs = PANDOC_OUTPUTS
         if src_ext not in pandoc_inputs or fmt not in pandoc_outputs:
             return False, "格式不在 pandoc 支持范围"
         cmd = [self.pandoc_path, src, "-o", dst, "--standalone"]

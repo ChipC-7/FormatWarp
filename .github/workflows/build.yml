@@ -30,6 +30,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 三平台统一安装指定版本 pandoc（官方预编译包），
+      # 不再依赖 scripts/fetch_pandoc.py 在打包过程中临时下载。
+      - name: 安装 pandoc
+        uses: r-lib/actions/setup-pandoc@v2
+        with:
+          pandoc-version: "3.12"
+
+      # 复制到 sidecar 资源目录，PyInstaller --add-data 会把它打包进后端
+      - name: 准备内置 pandoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backend/resources/pandoc
+          PANDOC_BIN="$(command -v pandoc)"
+          DEST="backend/resources/pandoc/pandoc"
+          case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*) DEST="${DEST}.exe" ;;
+          esac
+          cp "${PANDOC_BIN}" "${DEST}"
+          chmod +x "${DEST}" 2>/dev/null || true
+          "${DEST}" --version | head -n 1
+
       # Linux 构建 Tauri 所需的 WebKitGTK 等系统依赖
       - name: 安装 Linux 系统依赖
         if: runner.os == 'linux'
@@ -80,11 +102,13 @@ jobs:
 
       # tauri build 会触发 beforeBuildCommand：
       #   npm run build（前端）+ python ../scripts/build_sidecar.py（sidecar）
-      # sidecar 构建会自动下载对应平台的内置 pandoc。
+      # pandoc 已在上方预置到 backend/resources/pandoc，sidecar 只负责打包；
+      # FORMATWARP_NO_PANDOC_FETCH=1 禁止构建脚本在缺失时回退下载。
       - name: 构建 Tauri 应用并发布
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FORMATWARP_NO_PANDOC_FETCH: "1"
           # Windows runner 默认 cp1252，强制子进程使用 UTF-8，防止中文 print 崩溃
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"

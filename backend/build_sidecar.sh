@@ -45,6 +45,11 @@ python3 -c "import PySide6" 2>/dev/null || true   # 忽略：不参与打包
 # 确保内置 pandoc 已就绪（用户无需自行安装）
 PANDOC_BIN="${PROJECT_ROOT}/backend/resources/pandoc/pandoc"
 if [ ! -f "${PANDOC_BIN}" ]; then
+  if [ "${FORMATWARP_NO_PANDOC_FETCH:-0}" = "1" ]; then
+    echo "!! 未找到内置 pandoc：${PANDOC_BIN}" >&2
+    echo "!! CI 应在构建前安装并复制 pandoc；本地可执行 python3 scripts/fetch_pandoc.py" >&2
+    exit 1
+  fi
   echo "==> 未找到内置 pandoc，执行下载脚本…"
   python3 "${PROJECT_ROOT}/scripts/fetch_pandoc.py"
 fi

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 全局设置页：默认输出目录 + 主题 + PyAV 引擎状态 + 各模块并行数 + 超时
-import { computed, onMounted, ref } from "vue";
+import { computed, h, onMounted, ref } from "vue";
 import { useDialog, useMessage } from "naive-ui";
 import {
   NAlert, NButton, NCard, NInput, NInputGroup, NInputNumber, NSelect,
@@ -94,6 +94,36 @@ async function browseDir(): Promise<void> {
 
 function resetDir(): void {
   defaultOutputDir.value = "";
+}
+
+function showAbout(): void {
+  dialog.info({
+    title: "关于 FormatWarp",
+    content: () =>
+      h("div", { style: "line-height: 1.9; font-size: 14px" }, [
+        h("p", { style: "margin: 0 0 6px" }, [
+          h("strong", null, "作者："),
+          "ChipC-7",
+        ]),
+        h("p", { style: "margin: 0 0 6px" }, [
+          h("strong", null, "项目："),
+          "FormatWarp（格式跃迁）",
+        ]),
+        h("p", { style: "margin: 0 0 6px" }, [
+          h("strong", null, "简介："),
+          "完全本地运行的音频、视频、图片与文档格式转换工具，文件不出本机，无需上传云端。",
+        ]),
+        h("p", { style: "margin: 0 0 6px" }, [
+          h("strong", null, "版本："),
+          `v${engine.version}`,
+        ]),
+        h("p", { style: "margin: 0; opacity: 0.65" }, [
+          h("strong", null, "GitHub："),
+          "github.com/ChipC-7/FormatWarp",
+        ]),
+      ]),
+    positiveText: "知道了",
+  });
 }
 
 async function selectTheme(mode: ThemeMode): Promise<void> {
@@ -276,6 +306,10 @@ onMounted(async () => {
           <n-button type="primary" :loading="saving" @click="save">
             <template #icon><AppIcon name="save" :size="16" /></template>
             保存设置
+          </n-button>
+          <n-button @click="showAbout">
+            <template #icon><AppIcon name="info" :size="16" /></template>
+            关于
           </n-button>
         </n-space>
       </n-card>

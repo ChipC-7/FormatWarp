@@ -99,6 +99,110 @@ def pillow_available() -> bool:
         return False
 
 
+def register_optional_plugins() -> None:
+    """注册可选图片插件（缺失时静默跳过，由能力预检给出具体原因）。"""
+    try:
+        import pillow_jxl  # noqa: F401
+    except Exception:
+        pass
+    try:
+        import pillow_avif  # noqa: F401
+    except Exception:
+        pass
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+
+
+_PLUGIN_HINT = {
+    "avif": "pillow-avif-plugin",
+    "jxl": "pillow-jxl-plugin",
+    "svg": "vtracer",
+}
+
+
+def check_output_supported(output_format: str) -> Optional[str]:
+    """检查图片输出格式在当前环境是否可用。
+
+    返回 None 表示可输出；返回文案表示缺少编码器/插件，直接作为
+    /api/formats 的 unsupported_reason 与 UI 置灰提示。
+    """
+    fmt = (output_format or "").lower()
+    info = SUPPORTED_IMAGE_FORMATS.get(fmt)
+    if info is None:
+        return f"未知图片输出格式：{fmt}"
+    if not pillow_available():
+        return "Pillow 未安装，无法执行图片转换（pip install pillow）。"
+
+    register_optional_plugins()
+
+    if fmt == "svg":
+        try:
+            import vtracer  # noqa: F401
+        except Exception:
+            return (
+                "当前环境缺少位图转 SVG 引擎 vtracer。\n"
+                "👉 请安装：pip install vtracer"
+            )
+        return None
+
+    try:
+        from PIL import Image
+    except Exception:
+        return "Pillow 未安装，无法执行图片转换（pip install pillow）。"
+
+    ext = info["ext"].lower()
+    if ext not in Image.registered_extensions():
+        hint = _PLUGIN_HINT.get(fmt, "对应的 Pillow 编码器/插件")
+        return (
+            f"Pillow 当前未注册「{fmt.upper()}」输出支持（缺少 {hint}）。\n"
+            f"👉 请安装对应插件后重启后端。"
+        )
+    return None
+
+
+def check_conversion_supported(input_path: str, output_format: str) -> Optional[str]:
+    """按输入文件扩展名 + 输出格式做组合预检，避免提交后必然失败。"""
+    reason = check_output_supported(output_format)
+    if reason:
+        return reason
+
+    ext = os.path.splitext(input_path)[1].lower().lstrip(".")
+    if ext not in INPUT_IMAGE_FORMATS and ext not in RAW_INPUT_EXTS:
+        return f"不支持的图片输入格式：{ext or '(无扩展名)'}"
+    if ext == "svg":
+        try:
+            import cairosvg  # noqa: F401
+        except Exception:
+            return (
+                "SVG 输入需要 cairosvg 光栅化引擎。\n"
+                "👉 请安装：pip install cairosvg（Linux 还需系统 libcairo）"
+            )
+    elif ext in RAW_INPUT_EXTS:
+        try:
+            import rawpy  # noqa: F401
+        except Exception:
+            return "RAW 输入需要 rawpy（pip install rawpy）。"
+    elif ext in ("avif", "jxl", "heic", "heif"):
+        try:
+            from PIL import Image
+        except Exception:
+            return "Pillow 未安装，无法读取该图片格式。"
+        # 以 Pillow 实际注册的扩展名为准：AVIF 可能是 Pillow 内置，
+        # JXL/HEIC 则依赖可选插件。
+        if f".{ext}" not in Image.registered_extensions():
+            hint = {
+                "avif": "pillow-avif-plugin",
+                "jxl": "pillow-jxl-plugin",
+                "heic": "pillow-heif",
+                "heif": "pillow-heif",
+            }[ext]
+            return f"{ext.upper()} 输入需要 {hint}（安装后重启后端）。"
+    return None
+
+
 def _is_svg(path: str) -> bool:
     """判断输入是否为 SVG：先看扩展名，再嗅探文件开头的 <svg 标记。"""
     if path.lower().endswith(".svg"):
@@ -143,6 +247,12 @@ def _load_raw_image(path: str):
             rgb = raw.postprocess()  # RGB ndarray（含白平衡、去马赛克）
     except Exception as e:
         raise RuntimeError(f"RAW 解码失败：{e}") from e
+    # 本函数在模块级定义，不能依赖 convert_image() 内的局部 Image 导入；
+    # 这里单独导入，避免启用 RAW 输入后出现 NameError。
+    try:
+        from PIL import Image
+    except Exception as e:
+        raise RuntimeError("RAW 转换需要 Pillow：pip install pillow") from e
     return Image.fromarray(rgb)
 
 
@@ -213,11 +323,8 @@ def convert_image(task, progress_cb: Callable[[int], None],
     except Exception as e:
         return False, f"Pillow 未安装: {e}"
 
-    # 注册 JPEG XL 插件（可选依赖，缺失时仅 JXL 转换报错，不影响其他格式）
-    try:
-        import pillow_jxl  # noqa: F401
-    except Exception:
-        pass
+    # 注册可选图像插件（JXL/AVIF 输出、HEIC/HEIF 输入）
+    register_optional_plugins()
 
     progress_cb(5)
     if should_abort_cb():

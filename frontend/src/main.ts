@@ -2,8 +2,7 @@ import { createApp } from "vue";
 import { createPinia } from "pinia";
 import App from "./App.vue";
 import router from "./router";
-import { initBackend, connected } from "./composables/useBackend";
-import { initBackendPort } from "./api/client";
+import { bootBackend, connected } from "./composables/useBackend";
 import { useSettingsStore } from "./stores/settings";
 import { useEngineStore } from "./stores/engine";
 
@@ -13,9 +12,8 @@ async function bootstrap(): Promise<void> {
   app.use(router);
   app.mount("#app");
 
-  // 先解析后端端口，再建立 WS 连接与数据加载
-  await initBackendPort();
-  initBackend();
+  // 先等后端端口 + 健康检查 + WebSocket 就绪，再显示主界面并加载数据
+  await bootBackend();
 
   void useSettingsStore().load();
   void useEngineStore().refresh();

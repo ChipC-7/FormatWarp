@@ -19,7 +19,7 @@ import socket
 import subprocess
 import sys
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +32,7 @@ from .engines import audio_engine, video_engine, image_engine, doc_engine
 
 import av_engine  # 项目根目录的 av_engine（backend.engines.__init__ 已加 sys.path）
 
-APP_VERSION = "3.1.1"
+APP_VERSION = "3.2.0"
 
 # =====================================================================
 # 引擎探测
@@ -148,16 +148,19 @@ FORMATS_INFO_MAP = {
 }
 
 
-def _precheck_outputs(outputs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """逐个输出格式做编码器/封装器预检，附加 supported / unsupported_reason。
+def _precheck_outputs(
+    outputs: List[Dict[str, Any]],
+    checker: Callable[[str], Optional[str]] = av_engine.check_output_supported,
+) -> List[Dict[str, Any]]:
+    """逐个输出格式做能力预检，附加 supported / unsupported_reason。
 
-    av_engine.check_output_supported 返回 None 表示可输出；返回文案表示
-    不受支持，该文案直接作为前端置灰悬停的提示。
+    checker 返回 None 表示可输出；返回文案表示不受支持，该文案直接
+    作为前端置灰悬停的提示。
     """
     checked: List[Dict[str, Any]] = []
     for o in outputs:
         item = {"key": o["key"], "desc": o["desc"], "ext": o["ext"]}
-        reason = av_engine.check_output_supported(item["key"])
+        reason = checker(item["key"])
         if reason is None:
             item["supported"] = True
         else:
@@ -175,7 +178,8 @@ async def formats(module: str = Query(...)) -> Dict[str, Any]:
       格式在 UI 置灰，从源头避免无效提交）；
     - video：另返回 extract_audio_outputs（「提取音频」的 8 种音频格式，
       同样带 supported 标记），前端据此渲染第二组下拉，无需硬编码；
-    - image/doc：输出格式默认全部 supported。
+    - image/doc：同样按当前环境插件/文档引擎能力预检，缺依赖的输出格式
+      直接置灰，避免用户选中后才失败。
     """
     info_fn = FORMATS_INFO_MAP.get(module)
     if info_fn is None:
@@ -190,10 +194,14 @@ async def formats(module: str = Query(...)) -> Dict[str, Any]:
         info["extract_audio_outputs"] = _precheck_outputs(extract)
     elif module == "audio":
         info["outputs"] = _precheck_outputs(info.get("outputs", []))
-    else:
-        # image/doc：默认全部支持
-        for o in info.get("outputs", []):
-            o["supported"] = True
+    elif module == "image":
+        info["outputs"] = _precheck_outputs(
+            info.get("outputs", []), image_engine.check_output_supported
+        )
+    else:  # doc
+        info["outputs"] = _precheck_outputs(
+            info.get("outputs", []), doc_engine.check_output_supported
+        )
     return info
 
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 文档转换页：14 种输出格式 + PDF DPI + 引擎状态面板
-import { computed, ref } from "vue";
+// 文档转换页：18 种输出格式 + PDF DPI + 引擎状态面板
+import { computed, h, ref, watch } from "vue";
 import {
   NAlert, NButton, NCard, NCheckbox, NEmpty, NForm, NFormItem, NInput,
   NInputGroup, NInputNumber, NList, NListItem, NProgress, NSelect, NSpace,
@@ -15,7 +15,17 @@ const page = useConverterPage("doc", true); // 拖入允许递归目录
 const engine = useEngineStore();
 
 const formatOptions = computed<SelectOption[]>(() =>
-  (page.formats.value?.outputs ?? []).map((o) => ({ label: o.desc, value: o.key })),
+  (page.formats.value?.outputs ?? []).map((o) => {
+    const opt: SelectOption = { value: o.key, disabled: o.supported === false };
+    if (o.supported === false) {
+      opt.label = `${o.desc}（不支持）`;
+      opt.render = () =>
+        h("span", { title: o.unsupported_reason ?? "该格式不受支持" }, `${o.desc}（不支持）`);
+    } else {
+      opt.label = o.desc;
+    }
+    return opt;
+  }),
 );
 
 // ---------- 状态 ----------
@@ -23,6 +33,27 @@ const outputFormat = ref("pdf");
 const outputDir = ref("");
 const pdfDpi = ref(200);
 const overwrite = ref(false);
+
+const selectedFormat = computed(() =>
+  (page.formats.value?.outputs ?? []).find((o) => o.key === outputFormat.value),
+);
+const hasAnySupported = computed(() =>
+  (page.formats.value?.outputs ?? []).some((o) => o.supported !== false),
+);
+const canConvert = computed(() => selectedFormat.value?.supported !== false && hasAnySupported.value);
+
+// 当前格式不可用时自动回退到第一个可用格式
+watch(
+  () => page.formats.value,
+  () => {
+    const list = page.formats.value?.outputs ?? [];
+    const cur = list.find((o) => o.key === outputFormat.value);
+    if (!cur || cur.supported === false) {
+      const first = list.find((o) => o.supported !== false);
+      if (first) outputFormat.value = first.key;
+    }
+  },
+);
 
 async function browseOutputDir(): Promise<void> {
   const dir = await page.pickDirectory();
@@ -80,6 +111,9 @@ const engineLines = computed<EngineLine[]>(() => {
     <n-alert type="success" class="hint">
       <template #icon><AppIcon name="lock" :size="16" /></template>
       文件不出本机，全程本地转换（五级文档引擎链）。
+    </n-alert>
+    <n-alert v-if="page.formats.value && !hasAnySupported" type="warning" class="hint">
+      当前环境没有可用的文档输出引擎，请先安装 pandoc 或对应的文档处理依赖。
     </n-alert>
 
     <n-card class="page-card">
@@ -159,7 +193,7 @@ const engineLines = computed<EngineLine[]>(() => {
       <!-- 底部操作 + 进度 -->
       <n-space class="action-bar" justify="space-between" align="center">
         <n-space>
-          <n-button type="primary" :loading="page.converting.value" @click="startConversion">
+          <n-button type="primary" :loading="page.converting.value" :disabled="!canConvert" @click="startConversion">
             <template #icon><AppIcon name="play" :size="15" /></template>
             开始转换
           </n-button>

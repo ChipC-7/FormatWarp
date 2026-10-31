@@ -1,5 +1,5 @@
 // fetch 封装：baseUrl = http://127.0.0.1:<port>
-// 端口优先级：Tauri 命令 backend_port（Rust 壳）→ localStorage → 默认 8765
+// 端口优先级：Tauri 命令 get_backend_port（Rust 壳）→ localStorage → 默认 8765
 
 import { invoke } from "@tauri-apps/api/core";
 
@@ -21,12 +21,12 @@ export function setBackendPort(port: number): void {
 }
 
 /** 启动时尝试从 Tauri 命令读取后端端口；非 Tauri 环境（浏览器 dev 双开）静默回退。
- *  - Tauri（prod/dev）：invoke("backend_port") 返回 Rust 侧解析的 FORMATWARP_PORT；
+ *  - Tauri（prod/dev）：invoke("get_backend_port") 返回 Rust 侧解析的 FORMATWARP_PORT；
  *  - 浏览器 dev：invoke 不可用 → 回退 localStorage / 固定 8765 直连，方便双开调试。 */
 export async function initBackendPort(): Promise<void> {
   try {
     // 仅当运行在 Tauri 环境时存在该命令
-    const port = await invoke<number>("backend_port");
+    const port = await invoke<number>("get_backend_port");
     if (port && port > 0) {
       setBackendPort(port);
     }

@@ -8,6 +8,8 @@
   - GLOBAL_CEILING 总信号量套在模块信号量外层，作为保护性上限
     （防止四模块全开 8 路时线程爆炸）；
   - 转换执行用 loop.run_in_executor 包裹同步引擎函数（线程池）；
+  - 队列元素为 (task_id, generation)：取消/重试会递增 generation，
+    worker 取到任务时及等待信号量后都会校验，旧队列条目自动丢弃；
   - should_abort 通过 cancelled set 实现，cb=lambda: task_id in cancelled；
   - 任务状态机：pending → running → (paused|done|failed|cancelled)
     paused 仅对排队中任务生效（引擎无暂停能力，如实实现并在文案说明）；
@@ -21,11 +23,11 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import super_pool, ws
 from .engines import audio_engine, video_engine, image_engine, doc_engine
-from .state import MODULES
+from .state import MODULES, SUPER_PROCESSES_MAX, SUPER_THREADS_MAX
 
 # =====================================================================
 # 常量
@@ -34,6 +36,10 @@ from .state import MODULES
 # 保护性总上限：四模块并行数全开（8×4=32）时，仍最多 16 路并发执行，
 # 避免线程池与系统负载爆炸。仅作为安全阀，正常配置下不会触发。
 GLOBAL_CEILING = 16
+
+# worker 协程数必须覆盖超级模式的最大总名额（进程数×每进程线程数上限），
+# 否则超级模式会被 worker 数限制，而不是被 _super_sem 的 N×T 名额限制。
+MAX_WORKERS = max(GLOBAL_CEILING, SUPER_PROCESSES_MAX * SUPER_THREADS_MAX)
 
 MODULE_LABEL = {
     "audio": "🎵 音频",
@@ -47,6 +53,13 @@ ENGINE_MAP = {
     "video": video_engine.run,
     "image": image_engine.convert_image,
     "doc": doc_engine.convert_doc,
+}
+
+# 图片/文档在提交阶段做“输入格式 + 输出格式”组合预检，
+# 必然失败的任务直接标记 failed，不再进入队列。
+CONVERSION_VALIDATORS = {
+    "image": image_engine.check_conversion_supported,
+    "doc": doc_engine.check_conversion_supported,
 }
 
 # 各模块引擎任务字段默认值（鸭子类型任务对象缺失时补齐）
@@ -84,6 +97,9 @@ class TaskRecord:
     # 当前下发尝试令牌：每次（重新）提交唯一，结果按令牌精确匹配，
     # 避免排队取消后迟到的旧执行冒领重试结果
     attempt: int = 0
+    # 队列代次：每次（重新）入队唯一。worker 必须校验该值，防止取消/重试后
+    # 仍留在 asyncio.Queue 里的旧条目被执行第二次。
+    generation: int = 1
     status: str = "pending"          # pending/running/paused/done/failed/cancelled
     progress: int = 0
     success: Optional[bool] = None
@@ -159,7 +175,8 @@ class TaskManager:
     def __init__(self, settings):
         self._settings = settings
         self._tasks: Dict[int, TaskRecord] = {}
-        self._queue: "asyncio.Queue[int]" = asyncio.Queue()
+        # 队列元素为 (task_id, generation)：generation 用于作废旧队列项
+        self._queue: "asyncio.Queue[Tuple[int, int]]" = asyncio.Queue()
         self._semaphores: Dict[str, asyncio.Semaphore] = {}
         self._global_sem: Optional[asyncio.Semaphore] = None
         self._workers: List[asyncio.Task] = []
@@ -189,9 +206,10 @@ class TaskManager:
         self._global_sem = asyncio.Semaphore(GLOBAL_CEILING)
         for m in MODULES:
             self._semaphores[m] = asyncio.Semaphore(mp[m])
-        # 工作协程数 = 全局上限：任务先被任意 worker 取出，再由
-        # 全局信号量 + 模块信号量限流，模块之间名额互不占用。
-        self._workers = [asyncio.create_task(self._worker_loop()) for _ in range(GLOBAL_CEILING)]
+        # 工作协程数 = 普通模式全局上限与超级模式最大名额中的较大值：
+        # 任务先被任意 worker 取出，普通模式再由全局信号量 + 模块信号量限流；
+        # 超级模式则由 N×T 的 _super_sem 限流，模块之间名额互不占用。
+        self._workers = [asyncio.create_task(self._worker_loop()) for _ in range(MAX_WORKERS)]
 
     def _parallel_map(self) -> Dict[str, int]:
         """从 settings 读取各模块并行数（缺省按 2）。"""
@@ -413,6 +431,28 @@ class TaskManager:
                     created.append(rec)
                     continue
 
+                # 图片/文档：按实际输入 + 输出组合预检，避免进入队列后才失败
+                validator = CONVERSION_VALIDATORS.get(module)
+                reason = None
+                if validator:
+                    try:
+                        reason = validator(input_path, output_format)
+                    except Exception as e:
+                        reason = f"能力预检失败：{e}"
+                if reason:
+                    rec = TaskRecord(
+                        task_id=task_id, batch_id=batch_id, module=module,
+                        filename=filename, input_path=input_path,
+                        output_path="", output_format=output_format,
+                        params=dict(params), status="failed",
+                        success=False, message=reason,
+                        finished_at=time.time(),
+                    )
+                    self._tasks[task_id] = rec
+                    await self._record_finish(rec)
+                    created.append(rec)
+                    continue
+
                 # 视频提取音频：产物是音频流，按音频格式表确定扩展名
                 is_extract_audio = (module == "video"
                                     and bool(params.get("extract_audio")))
@@ -432,26 +472,35 @@ class TaskManager:
                     params=dict(params),
                 )
                 self._tasks[task_id] = rec
-                self._queue.put_nowait(task_id)
+                self._queue.put_nowait((task_id, rec.generation))
                 created.append(rec)
         return created
 
     # ---- 工作循环 ----
     async def _worker_loop(self) -> None:
         while True:
-            task_id = await self._queue.get()
-            await self._process_task(task_id)
+            task_id, generation = await self._queue.get()
+            await self._process_task(task_id, generation)
 
-    async def _process_task(self, task_id: int) -> None:
+    @staticmethod
+    def _is_current(rec: Optional[TaskRecord], generation: int) -> bool:
+        """队列条目是否仍属于该任务当前代次。"""
+        return rec is not None and rec.generation == generation
+
+    async def _process_task(self, task_id: int, generation: int) -> None:
         rec = self._tasks.get(task_id)
-        if rec is None:
+        if not self._is_current(rec, generation):
+            # 取消/重试后遗留在队列里的旧条目：直接丢弃
             return
         # 超级模式：由总名额信号量限流（N×T），不再经过模块信号量/全局上限
         if self._super_enabled and self._super_engine is not None:
             if self._super_sem is None:
                 return
             async with self._super_sem:
-                await self._run_one(rec)
+                # 等待名额期间可能被取消/重试，拿锁后再校验一次
+                if not self._is_current(rec, generation):
+                    return
+                await self._run_one(rec, generation)
             return
         # 普通模式：先拿全局兜底上限，再拿模块信号量
         async with self._global_sem:
@@ -459,17 +508,28 @@ class TaskManager:
             if module_sem is None:
                 return
             async with module_sem:
-                await self._run_one(rec)
+                # 等待信号量期间可能被取消/重试，进入执行前再校验一次
+                if not self._is_current(rec, generation):
+                    return
+                await self._run_one(rec, generation)
 
-    async def _run_one(self, rec: TaskRecord) -> None:
+    async def _run_one(self, rec: TaskRecord, generation: int) -> None:
         """已获得全局 + 模块名额后，执行单个任务的主体逻辑。"""
         task_id = rec.task_id
+
+        # 代次已变化（取消后重试等）：旧执行不得触碰当前任务状态
+        if not self._is_current(rec, generation):
+            return
 
         # 排队中暂停：等待恢复（每 200ms 检查一次）
         while task_id in self._paused:
             if task_id in self._cancelled:
                 break
             await asyncio.sleep(0.2)
+
+        # 暂停等待期间可能已被取消/重试
+        if not self._is_current(rec, generation):
+            return
 
         if task_id in self._cancelled:
             await self._finish(rec, "cancelled", False, "已取消")
@@ -545,6 +605,11 @@ class TaskManager:
 
     # ---- 结束 ----
     async def _finish(self, rec: TaskRecord, status: str, success: bool, message: str) -> None:
+        # 幂等保护：pending 任务被 cancel() 立即结束后，队列里仍留有同一
+        # task_id；worker 稍后取到时会再次调用本函数。若已处于终态则直接
+        # 返回，避免重复写历史、重复推送 task_result / 日志。
+        if rec.status in ("done", "failed", "cancelled") and rec.finished_at:
+            return
         rec.status = status
         rec.success = bool(success)
         rec.message = message
@@ -600,8 +665,9 @@ class TaskManager:
         if self._super_engine is not None:
             self._super_engine.request_cancel(task_id)
         if rec.status == "pending":
-            # 已下发到队列的任务撤不回：立即作废本次尝试的 future，
+            # 已下发到队列的任务撤不回：递增代次使旧队列条目失效；
             # 迟到的旧执行结果回来时找不到 future，自动忽略
+            rec.generation += 1
             fut = self._super_futures.pop(rec.attempt, None)
             if fut is not None and not fut.done():
                 fut.cancel()
@@ -635,7 +701,9 @@ class TaskManager:
         rec.output_path = unique_output_path(
             rec.output_path, overwrite=False
         ) if os.path.exists(rec.output_path) else rec.output_path
-        self._queue.put_nowait(task_id)
+        # 新代次入队：旧队列条目（如有）会在 worker 取到后被代次校验丢弃
+        rec.generation += 1
+        self._queue.put_nowait((task_id, rec.generation))
         return {"ok": True, "message": f"任务 {task_id} 已重新入队"}
 
     async def pause(self, task_id: int) -> Dict[str, Any]:

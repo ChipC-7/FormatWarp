@@ -67,10 +67,20 @@ def ensure_pyinstaller(root: str) -> None:
 
 
 def ensure_pandoc(root: str) -> str:
-    """确保内置 pandoc 存在，返回其文件路径。"""
+    """确保内置 pandoc 存在，返回其文件路径。
+
+    CI 中由 workflow 预先安装并复制到资源目录，同时设置
+    FORMATWARP_NO_PANDOC_FETCH=1：缺失时直接报错，不再临时下载。
+    """
     exe = ".exe" if sys.platform.startswith("win") else ""
     path = os.path.join(root, "backend", "resources", "pandoc", f"pandoc{exe}")
     if not os.path.isfile(path):
+        if os.environ.get("FORMATWARP_NO_PANDOC_FETCH") == "1":
+            sys.exit(
+                f"未找到内置 pandoc：{path}\n"
+                "CI 应在构建前安装 pandoc 并复制到该路径；"
+                "本地构建可执行 python scripts/fetch_pandoc.py"
+            )
         print("==> 未找到内置 pandoc，执行下载脚本…")
         subprocess.run(
             [sys.executable, os.path.join(root, "scripts", "fetch_pandoc.py")],

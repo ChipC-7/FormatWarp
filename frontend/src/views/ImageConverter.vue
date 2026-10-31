@@ -1,6 +1,6 @@
 <script setup lang="ts">
-// 图片转换页：8 种输出格式 + 质量/缩放预设 + 保留 EXIF + 覆盖重名
-import { computed, ref } from "vue";
+// 图片转换页：10 种输出格式 + 质量/缩放预设 + 保留 EXIF + 覆盖重名
+import { computed, h, ref, watch } from "vue";
 import {
   NAlert, NButton, NCard, NCheckbox, NEmpty, NForm, NFormItem, NInput,
   NInputGroup, NList, NListItem, NProgress, NSelect, NSpace, NSpin, NDropdown,
@@ -12,7 +12,17 @@ import AppIcon from "../components/AppIcon.vue";
 const page = useConverterPage("image", true); // 拖入允许递归目录
 
 const formatOptions = computed<SelectOption[]>(() =>
-  (page.formats.value?.outputs ?? []).map((o) => ({ label: o.desc, value: o.key })),
+  (page.formats.value?.outputs ?? []).map((o) => {
+    const opt: SelectOption = { value: o.key, disabled: o.supported === false };
+    if (o.supported === false) {
+      opt.label = `${o.desc}（不支持）`;
+      opt.render = () =>
+        h("span", { title: o.unsupported_reason ?? "该格式不受支持" }, `${o.desc}（不支持）`);
+    } else {
+      opt.label = o.desc;
+    }
+    return opt;
+  }),
 );
 
 const qualityOptions = computed<SelectOption[]>(() =>
@@ -43,6 +53,27 @@ const quality = ref(92);
 const scaleMode = ref<string>("__keep__");
 const keepExif = ref(true);
 const overwrite = ref(false);
+
+const selectedFormat = computed(() =>
+  (page.formats.value?.outputs ?? []).find((o) => o.key === outputFormat.value),
+);
+const hasAnySupported = computed(() =>
+  (page.formats.value?.outputs ?? []).some((o) => o.supported !== false),
+);
+const canConvert = computed(() => selectedFormat.value?.supported !== false && hasAnySupported.value);
+
+// 当前格式不可用时自动回退到第一个可用格式
+watch(
+  () => page.formats.value,
+  () => {
+    const list = page.formats.value?.outputs ?? [];
+    const cur = list.find((o) => o.key === outputFormat.value);
+    if (!cur || cur.supported === false) {
+      const first = list.find((o) => o.supported !== false);
+      if (first) outputFormat.value = first.key;
+    }
+  },
+);
 
 async function browseOutputDir(): Promise<void> {
   const dir = await page.pickDirectory();
@@ -77,6 +108,9 @@ async function startConversion(): Promise<void> {
     <n-alert type="success" class="hint">
       <template #icon><AppIcon name="lock" :size="16" /></template>
       文件不出本机，全程本地转换（Pillow 引擎）。
+    </n-alert>
+    <n-alert v-if="page.formats.value && !hasAnySupported" type="warning" class="hint">
+      当前环境没有可用的图片输出插件，请先安装 Pillow / cairosvg / vtracer / pillow-jxl-plugin 等依赖。
     </n-alert>
 
     <n-card class="page-card">
@@ -153,7 +187,7 @@ async function startConversion(): Promise<void> {
       <!-- 底部操作 + 进度 -->
       <n-space class="action-bar" justify="space-between" align="center">
         <n-space>
-          <n-button type="primary" :loading="page.converting.value" @click="startConversion">
+          <n-button type="primary" :loading="page.converting.value" :disabled="!canConvert" @click="startConversion">
             <template #icon><AppIcon name="play" :size="15" /></template>
             开始转换
           </n-button>

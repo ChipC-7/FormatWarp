@@ -243,7 +243,23 @@ export function useConverterPage(module: ModuleName, recursive = false) {
         progress: 0,
         status: t.status,
       }));
-      message.success(`已提交 ${resp.tasks.length} 个任务`);
+      // 图片/文档等模块可能在提交阶段就因能力预检失败，不再进入队列
+      const invalid = resp.tasks.filter((t) => t.status === "failed");
+      if (invalid.length) {
+        const first = invalid[0];
+        const reason = (first.message || "该格式组合不受支持").split("\n")[0];
+        message.warning(
+          `${invalid.length} 个任务无法转换：${first.filename} — ${reason}`,
+        );
+      } else {
+        message.success(`已提交 ${resp.tasks.length} 个任务`);
+      }
+      // 全部任务都在提交阶段失败时，不要停留在“转换中”状态
+      if (batchTasks.value.every((t) =>
+        t.status === "failed" || t.status === "done" || t.status === "cancelled"
+      )) {
+        converting.value = false;
+      }
       return true;
     } catch {
       message.error("提交任务失败（后端未连接）");

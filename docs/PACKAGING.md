@@ -55,6 +55,12 @@ BUILD_TOOL=nuitka bash backend/build_sidecar.sh   # 可选 Nuitka
   `--include-package` 排查、编译期长；作为体积优化手段。
 - 切换方式：`BUILD_TOOL=nuitka` 环境变量（脚本已内置两套命令）。
 
+**内置 pandoc**
+- 本地构建：缺少 `backend/resources/pandoc/pandoc` 时由 `scripts/fetch_pandoc.py` 自动下载。
+- GitHub Actions：先通过 `r-lib/actions/setup-pandoc@v2` 安装 pandoc 3.12，再复制到
+  `backend/resources/pandoc/`；同时设置 `FORMATWARP_NO_PANDOC_FETCH=1`，构建脚本
+  发现资源缺失时直接报错，不再在打包过程中临时下载。
+
 ---
 
 ## 3. 构建桌面安装包
