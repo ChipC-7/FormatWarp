@@ -1,10 +1,10 @@
 <script setup lang="ts">
-// 全局设置页：默认输出目录 + 主题 + PyAV 引擎状态 + 各模块并行数 + 超时
+// 全局设置页：默认输出目录 + 主题 + 大型引擎状态 + 各模块并行数 + 超时
 import { computed, h, onMounted, ref } from "vue";
 import { useDialog, useMessage } from "naive-ui";
 import {
-  NAlert, NButton, NCard, NInput, NInputGroup, NInputNumber, NSelect,
-  NSpace, NSpin, NDivider, NSwitch,
+  NAlert, NButton, NCard, NCollapse, NCollapseItem, NInput, NInputGroup,
+  NInputNumber, NSelect, NSpace, NSpin, NDivider, NSwitch,
 } from "naive-ui";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore } from "../stores/settings";
@@ -46,6 +46,83 @@ const cpuCores = navigator.hardwareConcurrency || 4;
 const totalConcurrency = computed(() => superProcesses.value * superThreads.value);
 /** 总并发达到/超过逻辑核心数时给出高危提示 */
 const overCoreRisk = computed(() => totalConcurrency.value >= cpuCores);
+
+// ---------- 大型引擎状态（可折叠） ----------
+type EngineTone = "ok" | "bad";
+interface EngineLine {
+  label: string;
+  value: string;
+}
+interface EngineEntry {
+  key: string;
+  name: string;
+  tone: EngineTone;
+  summary: string;
+  lines: EngineLine[];
+}
+
+const engineEntries = computed<EngineEntry[]>(() => {
+  const s = engine.status;
+  if (!s) return [];
+  const doc = s.doc;
+  const gpuNames = Object.values(s.av.gpu ?? {});
+  const pandoc = doc?.pandoc ?? null;
+  const wkhtmltopdf = doc?.wkhtmltopdf ?? null;
+  const latex = doc?.latex ?? null;
+  const weasyprint = Boolean(doc?.native_flags?.weasyprint);
+  const pdfRoutes = [
+    wkhtmltopdf ? "wkhtmltopdf" : "",
+    latex ? "LaTeX" : "",
+    weasyprint ? "WeasyPrint" : "",
+  ].filter(Boolean);
+
+  return [
+    {
+      key: "av",
+      name: "PyAV / FFmpeg",
+      tone: s.av.available ? "ok" : "bad",
+      summary: s.av.available ? "已就绪" : "不可用",
+      lines: [
+        { label: "版本", value: `PyAV ${s.av.version}（内置 FFmpeg）` },
+        { label: "用途", value: "音频、视频转码与硬件加速" },
+        { label: "能力", value: `${s.av.muxers ?? 0} 个封装器 / ${s.av.encoders ?? 0} 个编码器` },
+        { label: "硬件加速", value: gpuNames.length ? gpuNames.join("、") : "未检测到可用 GPU" },
+      ],
+    },
+    {
+      key: "pillow",
+      name: "Pillow 图片引擎",
+      tone: s.pillow ? "ok" : "bad",
+      summary: s.pillow ? "已就绪" : "不可用",
+      lines: [
+        { label: "用途", value: "PNG / JPEG / WebP / AVIF / JXL 等图片转换" },
+        { label: "说明", value: s.pillow ? "Pillow 可正常导入与保存" : "未安装或无法导入 Pillow" },
+      ],
+    },
+    {
+      key: "pandoc",
+      name: "Pandoc 文档引擎",
+      tone: pandoc ? "ok" : "bad",
+      summary: pandoc ? "已就绪" : "未检测到",
+      lines: [
+        { label: "路径", value: pandoc ?? "未检测到内置或系统 pandoc" },
+        { label: "用途", value: "DOCX / ODT / EPUB / RST / LaTeX / PPTX 等文档互转" },
+      ],
+    },
+    {
+      key: "pdf",
+      name: "PDF 渲染引擎",
+      tone: pdfRoutes.length ? "ok" : "bad",
+      summary: pdfRoutes.length ? pdfRoutes.join(" / ") : "未检测到",
+      lines: [
+        { label: "wkhtmltopdf", value: wkhtmltopdf ?? "未检测到" },
+        { label: "LaTeX", value: latex ?? "未检测到 tectonic / xelatex" },
+        { label: "WeasyPrint", value: weasyprint ? "可用" : "未安装" },
+        { label: "用途", value: "HTML / 文档 → PDF" },
+      ],
+    },
+  ];
+});
 
 /** 切换超级模式：开启前弹确认框，明确资源占用风险 */
 function toggleSuper(value: boolean): void {
@@ -198,37 +275,35 @@ onMounted(async () => {
         </n-space>
       </n-card>
 
-      <!-- PyAV 引擎状态 -->
-      <n-card title="PyAV 引擎" size="small" class="section">
-        <div v-if="engine.status" class="engine-info">
-          <div class="engine-row">
-            <span class="engine-label">状态</span>
-            <span class="av-state" :class="{ ok: engine.status.av.available, bad: !engine.status.av.available }">
-              <AppIcon :name="engine.status.av.available ? 'check-circle' : 'x-circle'" :size="16" />
-              {{ engine.status.av.available ? "已就绪" : "不可用" }}
-            </span>
-          </div>
-          <div class="engine-row">
-            <span class="engine-label">版本</span>
-            <span>PyAV {{ engine.status.av.version }}（内置 FFmpeg）</span>
-          </div>
-          <div class="engine-row">
-            <span class="engine-label">能力</span>
-            <span>{{ engine.status.av.muxers ?? 0 }} 个封装器 / {{ engine.status.av.encoders ?? 0 }} 个编码器</span>
-          </div>
-          <div class="engine-row">
-            <span class="engine-label">硬件加速</span>
-            <span>
-              {{
-                Object.keys(engine.status.av.gpu ?? {}).length
-                  ? Object.values(engine.status.av.gpu).join("、")
-                  : "未检测到可用 GPU"
-              }}
-            </span>
-          </div>
-          <div class="engine-row">
-            <span class="engine-label">磁盘剩余</span>
-            <span>{{ engine.diskFreeGb }} GB</span>
+      <!-- 大型引擎状态：默认折叠，避免把所有信息一次性铺开 -->
+      <n-card title="引擎状态" size="small" class="section">
+        <div v-if="engine.status">
+          <n-collapse>
+            <n-collapse-item
+              v-for="e in engineEntries"
+              :key="e.key"
+              :name="e.key"
+            >
+              <template #header>
+                <div class="engine-head">
+                  <AppIcon
+                    :name="e.tone === 'ok' ? 'check-circle' : 'x-circle'"
+                    :size="15"
+                  />
+                  <span class="engine-name">{{ e.name }}</span>
+                  <span class="engine-summary" :class="e.tone">{{ e.summary }}</span>
+                </div>
+              </template>
+              <div class="engine-info">
+                <div v-for="line in e.lines" :key="line.label" class="engine-row">
+                  <span class="engine-label">{{ line.label }}</span>
+                  <span>{{ line.value }}</span>
+                </div>
+              </div>
+            </n-collapse-item>
+          </n-collapse>
+          <div class="engine-note">
+            仅展示大型转换引擎；python-docx、openpyxl、pypdf 等小型 Python 转换库不再逐项列出。
           </div>
         </div>
         <n-alert v-else type="warning" :show-icon="false">引擎状态加载中（后端未连接）…</n-alert>
@@ -323,13 +398,27 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
 }
-.av-state {
-  display: inline-flex;
+.engine-head {
+  display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
+  min-width: 0;
 }
-.av-state.ok { color: #34d399; }
-.av-state.bad { color: #f87171; }
+.engine-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.engine-summary {
+  font-size: 12px;
+  opacity: 0.8;
+}
+.engine-summary.ok { color: #34d399; }
+.engine-summary.bad { color: #f87171; }
+.engine-note {
+  margin-top: 10px;
+  font-size: 12px;
+  opacity: 0.6;
+}
 .super-label {
   display: inline-flex;
   align-items: center;

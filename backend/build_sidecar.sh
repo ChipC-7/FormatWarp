@@ -69,6 +69,7 @@ case "${BUILD_TOOL}" in
       --name "${BIN_NAME}" \
       --collect-all av \
       --collect-all PIL \
+      --collect-all imageio_ffmpeg \
       --collect-submodules backend \
       --add-data "${PROJECT_ROOT}/backend/resources/pandoc:resources/pandoc" \
       --paths "${PROJECT_ROOT}" \
@@ -85,6 +86,8 @@ case "${BUILD_TOOL}" in
       --onefile \
       --output-filename="${BIN_NAME}" \
       --include-package=av \
+      --include-package=imageio_ffmpeg \
+      --include-package-data=imageio_ffmpeg \
       --include-package=backend \
       --include-package=backend.engines \
       --include-data-files="${PANDOC_BIN}=resources/pandoc/pandoc" \

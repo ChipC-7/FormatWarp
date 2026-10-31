@@ -71,7 +71,6 @@ ps aux | grep -E "formatwarp-backend|uvicorn backend" | grep -v grep
 
 ### 磁盘空间不足
 - [ ] 转换进行中写盘失败 → 任务进入失败栏，消息含明确错误；应用不崩溃
-- [ ] 顶部/设置页磁盘剩余显示很小或为 0
 
 ### 端口被占
 - [ ] 手动先占用 8765（如 `python3 -m http.server 8765`）再启动应用

@@ -59,12 +59,20 @@ const audioBitrateOptions = computed<SelectOption[]>(() =>
     value: p.value === null ? "__auto__" : (p.value as string | number),
   })),
 );
+const speedOptions = computed<SelectOption[]>(() =>
+  (page.formats.value?.presets.encode_speed ?? []).map((p) => ({
+    label: p.label,
+    value: p.value as string,
+  })),
+);
 
 // ---------- 状态 ----------
 const outputFormat = ref("mp4");
 const outputDir = ref("");
 const videoBitrate = ref<string | number>("__auto__");
 const audioBitrate = ref<string | number>("__auto__");
+const encodingSpeed = ref("veryfast");
+const segmented = ref(true); // 超长视频自动分段并行编码
 
 // GPU 硬件加速
 const hwEnabled = ref(true);
@@ -112,7 +120,11 @@ async function startConversion(): Promise<void> {
       video_bitrate: restoreNull(videoBitrate.value),
       audio_bitrate: extractAudio.value ? restoreNull(audioBitrate.value) : null,
       extract_audio: extractAudio.value,
-      hardware_accel: extractAudio.value ? null : (hwEnabled.value ? restoreNull(hwValue.value) : null),
+      hardware_accel: extractAudio.value
+        ? null
+        : (!hwEnabled.value ? "cpu" : restoreNull(hwValue.value)),
+      encode_speed: encodingSpeed.value,
+      segmented: segmented.value,
     },
   });
 }
@@ -183,6 +195,9 @@ async function startConversion(): Promise<void> {
             <n-form-item label="视频码率">
               <n-select v-model:value="videoBitrate" :options="videoBitrateOptions" :disabled="extractAudio" />
             </n-form-item>
+            <n-form-item label="编码速度">
+              <n-select v-model:value="encodingSpeed" :options="speedOptions" :disabled="extractAudio" />
+            </n-form-item>
             <n-form-item label="提取音频">
               <n-checkbox v-model:checked="extractAudio">提取音频（忽略视频流）</n-checkbox>
             </n-form-item>
@@ -196,8 +211,15 @@ async function startConversion(): Promise<void> {
               <n-form-item label="加速引擎">
                 <n-select v-model:value="hwValue" :options="gpuOptions" :disabled="!hwEnabled" />
               </n-form-item>
+              <n-form-item label="长文件">
+                <n-checkbox v-model:checked="segmented">超长文件分段并行编码</n-checkbox>
+                <span class="hint-text">超过 5 分钟自动分段（最多 4 段）；分段使用 CPU 编码，开启 GPU 时可关闭</span>
+              </n-form-item>
             </template>
             <div class="hint-text">{{ gpuHint }}</div>
+            <div v-if="!extractAudio" class="hint-text">
+              编码速度仅在需要重编码视频时生效；同容器无损流直拷会忽略该设置。
+            </div>
           </n-form>
         </n-card>
       </div>

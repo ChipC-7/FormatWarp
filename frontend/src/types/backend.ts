@@ -22,6 +22,7 @@ export interface DocProbe {
   native_errors: Record<string, string | null>;
   pandoc: string | null;
   wkhtmltopdf: string | null;
+  latex: string | null;
 }
 
 export interface EngineStatus {

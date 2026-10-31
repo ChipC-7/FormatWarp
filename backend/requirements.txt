@@ -11,6 +11,8 @@ pydantic>=2.6
 
 # 转换引擎核心（音频/视频，进程内 FFmpeg）
 av>=18.1
+# 超长音视频分段并行编码（随 wheel 内置平台 ffmpeg 可执行文件）
+imageio-ffmpeg>=0.7
 
 # 图片引擎
 pillow>=11.0

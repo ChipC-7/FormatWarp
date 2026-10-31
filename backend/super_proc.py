@@ -30,8 +30,14 @@ ENGINE_MAP = {
 
 # 各模块参数字段默认值（须与 tasks.DEFAULTS_BY_MODULE 同步）
 DEFAULTS_BY_MODULE: Dict[str, Dict[str, Any]] = {
-    "audio": {"bitrate": None, "sample_rate": None, "channels": None, "normalize": False},
-    "video": {"video_bitrate": None, "audio_bitrate": None, "extract_audio": False, "hardware_accel": None},
+    "audio": {
+        "bitrate": None, "sample_rate": None, "channels": None,
+        "normalize": False, "segmented": True,
+    },
+    "video": {
+        "video_bitrate": None, "audio_bitrate": None, "extract_audio": False,
+        "hardware_accel": None, "encode_speed": "veryfast", "segmented": True,
+    },
     "image": {"quality": 92, "scale_mode": None, "keep_exif": True},
     "doc": {"pdf_dpi": 200, "keep_original": True},
 }

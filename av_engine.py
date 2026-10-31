@@ -227,6 +227,15 @@ def _safe_set_bitrate(stream, bitrate) -> None:
             pass
 
 
+# 解码器名与复用器可接受的编码器名可能不同（如 MP3 解码器叫 mp3float）
+_STREAM_COPY_CODEC_ALIASES = {"mp3float": "mp3"}
+
+
+def _copy_codec_name(ctx) -> str:
+    """流直拷时把解码器名映射为 muxer 可接受的编码器名。"""
+    return _STREAM_COPY_CODEC_ALIASES.get(ctx.name, ctx.name)
+
+
 def _bitrate_to_int(bitrate: Optional[str]) -> Optional[int]:
     """把 '192k' / '192' 等字符串转成 int(bit/s)；空返回 None。"""
     if not bitrate:
@@ -254,6 +263,15 @@ def _channel_count(layout) -> int:
         return n if n > 0 else 2
     except Exception:
         return 2
+
+
+_ENCODE_SPEEDS = {"ultrafast", "veryfast", "fast", "medium"}
+
+
+def _encode_speed(value) -> str:
+    """归一化 UI 编码速度档位（缺省 veryfast）。"""
+    speed = str(value or "veryfast").lower()
+    return speed if speed in _ENCODE_SPEEDS else "veryfast"
 
 
 def _layout_name_for(channels) -> str:
@@ -358,7 +376,7 @@ def _audio_stream_copy(task, container_name: str) -> Tuple[bool, str]:
         in_stream = src.streams.audio[0]
         ctx = in_stream.codec_context
         dst = av.open(task.output_path, mode="w", format=container_name)
-        out_stream = dst.add_stream(ctx.name)
+        out_stream = dst.add_stream(_copy_codec_name(ctx))
         out_stream.time_base = in_stream.time_base
         try:
             out_stream.codec_context.extradata = ctx.extradata
@@ -509,6 +527,22 @@ def convert_audio(task, progress_cb: Callable[[int], None],
         ok, msg = _audio_stream_copy(task, container_name)
         if ok:
             return True, msg
+
+    # 超长音频：尝试 FFmpeg CLI 分段并行编码；失败自动回退普通重编码
+    if getattr(task, "segmented", False):
+        try:
+            from backend.engines import segment_engine
+            attempted, ok, msg = segment_engine.try_segment_audio(
+                task, progress_cb, should_abort_cb,
+            )
+        except Exception:
+            attempted, ok, msg = False, False, ""
+        if attempted:
+            if ok:
+                return True, msg
+            if msg == "用户取消":
+                return False, msg
+
     return _audio_reencode(task, container_name, progress_cb, should_abort_cb)
 
 
@@ -527,7 +561,7 @@ def _video_stream_copy(task, container_name: str) -> Tuple[bool, str]:
             if in_stream.type not in ("video", "audio"):
                 continue
             ctx = in_stream.codec_context
-            out_stream = dst.add_stream(ctx.name)
+            out_stream = dst.add_stream(_copy_codec_name(ctx))
             out_stream.time_base = in_stream.time_base
             try:
                 out_stream.codec_context.extradata = ctx.extradata
@@ -796,11 +830,17 @@ def _video_to_gif(task, progress_cb: Callable[[int], None],
                 pass
 
 
-def _video_transcode(task, container_name: str, video_codec: str,
+def _video_transcode(task, container_name: str, video_codec: Optional[str],
                      hw_device: Optional[str],
                      progress_cb: Callable[[int], None],
-                     should_abort_cb: Callable[[], bool]) -> Tuple[bool, str]:
-    """视频/音频重编码（GPU 或 CPU），hw_device 为 None 时用软件编码。"""
+                     should_abort_cb: Callable[[], bool],
+                     copy_video: bool = False,
+                     copy_audio: bool = False) -> Tuple[bool, str]:
+    """视频/音频转换（GPU 或 CPU）。
+
+    copy_video/copy_audio 为 True 时对应流直接 remux，不重新编码；
+    仅重编码发生变化的那条流，可显著减少大文件处理时间。
+    """
     src = dst = None
     try:
         src = av.open(task.input_path)
@@ -809,8 +849,24 @@ def _video_transcode(task, container_name: str, video_codec: str,
         vstream = src.streams.video[0] if src.streams.video else None
         astream = src.streams.audio[0] if src.streams.audio else None
 
+        video_map = None
         out_video = None
-        if vstream is not None:
+        if vstream is not None and copy_video:
+            vctx = vstream.codec_context
+            out_video = dst.add_stream(_copy_codec_name(vctx))
+            out_video.time_base = vstream.time_base
+            try:
+                out_video.codec_context.extradata = vctx.extradata
+            except Exception:
+                pass
+            out_video.width = vctx.width
+            out_video.height = vctx.height
+            out_video.pix_fmt = vctx.pix_fmt
+            out_video.framerate = vstream.average_rate
+            video_map = out_video
+        elif vstream is not None:
+            if video_codec is None:
+                return False, "内部错误：缺少视频编码器"
             vctx = vstream.codec_context
             rate = vstream.average_rate or (25, 1)
             kwargs = {}
@@ -828,31 +884,67 @@ def _video_transcode(task, container_name: str, video_codec: str,
             }
             if vctx.pix_fmt in _COMPATIBLE_PIX_FMTS:
                 out_video.pix_fmt = vctx.pix_fmt
+            speed = _encode_speed(getattr(task, "encode_speed", None))
+            nvenc_preset = {
+                "ultrafast": "p1", "veryfast": "p2", "fast": "p4", "medium": "p5",
+            }.get(speed, "p2")
+            svt_preset = {
+                "ultrafast": "12", "veryfast": "10", "fast": "8", "medium": "6",
+            }.get(speed, "10")
+            vp9_speed = {
+                "ultrafast": {"deadline": "realtime", "cpu-used": "8"},
+                "veryfast": {"deadline": "realtime", "cpu-used": "6"},
+                "fast": {"deadline": "realtime", "cpu-used": "4"},
+                "medium": {"deadline": "good", "cpu-used": "2"},
+            }.get(speed, {"deadline": "realtime", "cpu-used": "6"})
+            software_speed = {"preset": speed}
+
             if video_codec == "h264_nvenc":
-                out_video.options = {"preset": "p4", "rc": "vbr"}
+                out_video.options = {"preset": nvenc_preset, "rc": "vbr"}
                 if getattr(task, "video_bitrate", None):
                     out_video.bit_rate = _bitrate_to_int(task.video_bitrate)
                 else:
                     out_video.options.update({"cq": "23"})
             elif getattr(task, "video_bitrate", None):
                 out_video.bit_rate = _bitrate_to_int(task.video_bitrate)
+                if video_codec == "libvpx-vp9":
+                    out_video.options = dict(vp9_speed)
+                elif video_codec == "libsvtav1":
+                    out_video.options = {"preset": svt_preset}
+                elif video_codec not in ("wmv2", "mpeg2video"):
+                    out_video.options = dict(software_speed)
             else:
                 # 恒定质量/默认参数：按编码器区分参数名（错配会直接编码失败）
                 if video_codec == "libvpx-vp9":
-                    out_video.options = {"crf": "30", "b": "0"}
+                    out_video.options = {"crf": "30", "b": "0", **vp9_speed}
                 elif video_codec == "libsvtav1":
                     # SVT-AV1：crf 范围 0-63，preset 为数字
-                    out_video.options = {"crf": "28", "preset": "8"}
+                    out_video.options = {"crf": "28", "preset": svt_preset}
                 elif video_codec in ("wmv2", "mpeg2video"):
                     # 这两个老式编码器无 CRF 模式，不设选项即使用默认高质量
                     pass
                 else:
-                    out_video.options = {"crf": "23", "preset": "medium"}
+                    out_video.options = {"crf": "23", **software_speed}
             if vctx.pix_fmt in _COMPATIBLE_PIX_FMTS and vctx.format:
                 out_video.format = vctx.format  # 仅随 YUV 继承，避免把 bgra 等格式强加给编码器
 
+        audio_map = None
         out_audio = None
-        if astream is not None:
+        pipeline = None
+        if astream is not None and copy_audio:
+            actx = astream.codec_context
+            out_audio = dst.add_stream(_copy_codec_name(actx))
+            out_audio.time_base = astream.time_base
+            try:
+                out_audio.codec_context.extradata = actx.extradata
+            except Exception:
+                pass
+            out_audio.sample_rate = actx.sample_rate or 44100
+            out_audio.layout = actx.layout
+            out_audio.format = actx.format
+            out_audio.bit_rate = actx.bit_rate
+            audio_map = out_audio
+        elif astream is not None:
             actx = astream.codec_context
             src_rate = actx.sample_rate or 44100
             src_format = actx.format.name if actx.format else "s16"
@@ -879,8 +971,6 @@ def _video_transcode(task, container_name: str, video_codec: str,
                 out_format=AUDIO_CODEC_FORMAT.get(audio_codec, "fltp"),
                 out_layout=src_layout, out_rate=src_rate, normalize=False,
             )
-        else:
-            pipeline = None
 
         total_us = float(src.duration or 0)
         done_us = 0.0
@@ -890,6 +980,19 @@ def _video_transcode(task, container_name: str, video_codec: str,
             if packet.stream.type not in ("video", "audio"):
                 continue
             if packet.stream.type == "video":
+                if copy_video:
+                    if out_video is None or packet.dts is None:
+                        continue
+                    packet.stream = video_map
+                    dst.mux(packet)
+                    if packet.pts is not None and packet.time_base is not None:
+                        done_us = max(
+                            done_us,
+                            float(packet.pts * packet.time_base) * 1_000_000.0,
+                        )
+                        if total_us > 0:
+                            progress_cb(min(99, int(done_us / total_us * 100)))
+                    continue
                 if out_video is None:
                     continue
                 for frame in packet.decode():
@@ -903,6 +1006,19 @@ def _video_transcode(task, container_name: str, video_codec: str,
                     if total_us > 0:
                         progress_cb(min(99, int(done_us / total_us * 100)))
             elif packet.stream.type == "audio":
+                if copy_audio:
+                    if out_audio is None or packet.dts is None:
+                        continue
+                    packet.stream = audio_map
+                    dst.mux(packet)
+                    if copy_video and packet.pts is not None and packet.time_base is not None:
+                        done_us = max(
+                            done_us,
+                            float(packet.pts * packet.time_base) * 1_000_000.0,
+                        )
+                        if total_us > 0:
+                            progress_cb(min(99, int(done_us / total_us * 100)))
+                    continue
                 if out_audio is None or pipeline is None:
                     continue
                 for frame in packet.decode():
@@ -912,17 +1028,24 @@ def _video_transcode(task, container_name: str, video_codec: str,
                         for out_packet in out_audio.encode(out_frame):
                             dst.mux(out_packet)
 
-        if out_video is not None:
+        if out_video is not None and not copy_video:
             for out_packet in out_video.encode(None):
                 dst.mux(out_packet)
-        if out_audio is not None and pipeline is not None:
+        if out_audio is not None and pipeline is not None and not copy_audio:
             for out_frame in pipeline.flush():
                 for out_packet in out_audio.encode(out_frame):
                     dst.mux(out_packet)
             for out_packet in out_audio.encode(None):
                 dst.mux(out_packet)
         progress_cb(100)
-        return True, "转换成功"
+        msg = "转换成功"
+        if copy_video and copy_audio:
+            msg += "（音视频流直拷）"
+        elif copy_video:
+            msg += "（视频流直拷，仅重编码音频）"
+        elif copy_audio:
+            msg += "（音频流直拷，仅重编码视频）"
+        return True, msg
     except _UserCancel:
         _delete_partial_output(getattr(task, "output_path", ""))
         return False, "用户取消"
@@ -973,17 +1096,37 @@ def convert_video(task, progress_cb: Callable[[int], None],
     # 但 wmv/mpg/vob/av1 的目标语义就是"特定编码器"：流直拷会保留源编码
     # （如源 H.264 → .wmv 文件里仍是 H.264），与用户选择的格式不符，故跳过直拷强制重编码。
     _FORCE_REENCODE_FORMATS = {"wmv", "mpg", "vob", "av1"}
-    if (not getattr(task, "video_bitrate", None)
-            and not getattr(task, "audio_bitrate", None)
-            and out_fmt not in _FORCE_REENCODE_FORMATS):
+    video_reencode = bool(getattr(task, "video_bitrate", None)) or \
+        out_fmt in _FORCE_REENCODE_FORMATS
+    audio_reencode = bool(getattr(task, "audio_bitrate", None))
+
+    if not video_reencode and not audio_reencode:
         ok, msg = _video_stream_copy(task, container_name)
         if ok:
             return True, msg
+        # 直拷失败：音视频都降级重编码
+        video_reencode = True
+        audio_reencode = True
 
-    # 决定硬件编码器
-    hw_key = getattr(task, "hardware_accel", None)
-    if hw_key == "cpu":
-        hw_key = None
+    # 超长视频：尝试 FFmpeg CLI 分段并行编码；失败自动回退普通路径
+    if video_reencode and getattr(task, "segmented", False):
+        try:
+            from backend.engines import segment_engine
+            attempted, ok, msg = segment_engine.try_segment_video(
+                task, progress_cb, should_abort_cb,
+            )
+        except Exception:
+            attempted, ok, msg = False, False, ""
+        if attempted:
+            if ok:
+                return True, msg
+            if msg == "用户取消":
+                return False, msg
+
+    # 决定硬件编码器（仅视频需要重编码时才会实际使用）
+    hw_setting = getattr(task, "hardware_accel", None)
+    allow_auto_hw = hw_setting != "cpu"
+    hw_key = None if hw_setting == "cpu" else hw_setting
     # 硬件编码器（GPU_ENCODER_MAP）全部产出 H.264，仅对兼容 H.264 的容器开放。
     # WebM/OGV(VP9)、WMV(WMV2)、MPG/VOB(MPEG2)、AV1(SVT-AV1)、GIF 都不接受 H.264，
     # 若错配会产出"扩展名对、内容无法播放"的损坏文件，这些格式一律软件编码。
@@ -992,7 +1135,8 @@ def convert_video(task, progress_cb: Callable[[int], None],
     }
     if out_fmt not in _HW_COMPATIBLE_FORMATS:
         hw_key = None
-    if hw_key is None:
+        allow_auto_hw = False
+    if hw_key is None and allow_auto_hw:
         # 自动：检测到 GPU 编码器则尝试，否则纯 CPU
         available_gpu = detect_gpu_encoders()
         if available_gpu:
@@ -1001,19 +1145,59 @@ def convert_video(task, progress_cb: Callable[[int], None],
         hw_key = None
 
     video_codec = SOFT_VIDEO_CODEC.get(out_fmt, "libx264")
-    if hw_key is not None:
-        hw_codec, hw_device, _ = GPU_ENCODER_MAP[hw_key]
-        ok, msg = _video_transcode(task, container_name, hw_codec, hw_device,
-                                   progress_cb, should_abort_cb)
-        if ok:
-            return True, "转换成功（硬件加速）"
-        # GPU 失败 → 删除半成品 → 降级软编
-        _delete_partial_output(getattr(task, "output_path", ""))
-        ok2, msg2 = _video_transcode(task, container_name, video_codec, None,
-                                     progress_cb, should_abort_cb)
-        if ok2:
-            return True, "转换成功（硬件加速失败，已自动降级为 CPU 编码）"
-        return False, f"硬件加速失败且 CPU 编码也失败：\n{msg2}"
 
-    return _video_transcode(task, container_name, video_codec, None,
-                            progress_cb, should_abort_cb)
+    def _full_reencode() -> Tuple[bool, str]:
+        """音视频都重新编码，保留硬件编码优先与 CPU 降级行为。"""
+        if hw_key is not None:
+            hw_codec, hw_device, _ = GPU_ENCODER_MAP[hw_key]
+            ok, msg = _video_transcode(
+                task, container_name, hw_codec, hw_device,
+                progress_cb, should_abort_cb,
+            )
+            if ok:
+                return True, f"{msg}（硬件加速）"
+            _delete_partial_output(getattr(task, "output_path", ""))
+            ok2, msg2 = _video_transcode(
+                task, container_name, video_codec, None,
+                progress_cb, should_abort_cb,
+            )
+            if ok2:
+                return True, f"{msg2}（硬件加速失败，已自动降级为 CPU 编码）"
+            return False, f"硬件加速失败且 CPU 编码也失败：\n{msg2}"
+        return _video_transcode(
+            task, container_name, video_codec, None,
+            progress_cb, should_abort_cb,
+        )
+
+    # 只改音频：视频流直拷，只重编码音频
+    if audio_reencode and not video_reencode:
+        ok, msg = _video_transcode(
+            task, container_name, None, None,
+            progress_cb, should_abort_cb, copy_video=True,
+        )
+        if ok:
+            return True, msg
+        _delete_partial_output(getattr(task, "output_path", ""))
+        return _full_reencode()
+
+    # 只改视频：音频流直拷，只重编码视频
+    if video_reencode and not audio_reencode:
+        if hw_key is not None:
+            hw_codec, hw_device, _ = GPU_ENCODER_MAP[hw_key]
+            ok, msg = _video_transcode(
+                task, container_name, hw_codec, hw_device,
+                progress_cb, should_abort_cb, copy_audio=True,
+            )
+            if ok:
+                return True, f"{msg}（硬件加速）"
+            _delete_partial_output(getattr(task, "output_path", ""))
+        ok, msg = _video_transcode(
+            task, container_name, video_codec, None,
+            progress_cb, should_abort_cb, copy_audio=True,
+        )
+        if ok:
+            return True, msg
+        _delete_partial_output(getattr(task, "output_path", ""))
+        return _full_reencode()
+
+    return _full_reencode()

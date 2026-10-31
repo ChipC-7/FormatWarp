@@ -137,6 +137,11 @@ def _find_pandoc() -> Optional[str]:
         return None
 
 
+def _find_latex() -> Optional[str]:
+    """探测 pandoc → PDF 所需的 LaTeX 引擎。"""
+    return shutil.which("tectonic") or shutil.which("xelatex")
+
+
 def _find_wkhtmltopdf() -> Optional[str]:
     """探测 wkhtmltopdf 二进制（HTML→PDF 专用）。"""
     for name in ("wkhtmltopdf", "wkhtmltopdf.exe"):
@@ -208,6 +213,7 @@ def probe() -> dict:
         "native_errors": errors,
         "pandoc": _find_pandoc(),
         "wkhtmltopdf": _find_wkhtmltopdf(),
+        "latex": _find_latex(),
     }
 
 
@@ -224,7 +230,7 @@ def _engine_snapshot() -> dict:
             "native_errors": errors,
             "pandoc": _find_pandoc(),
             "wkhtmltopdf": _find_wkhtmltopdf(),
-            "latex": shutil.which("tectonic") or shutil.which("xelatex"),
+            "latex": _find_latex(),
         }
     return _CAPABILITY_CACHE
 

@@ -50,6 +50,14 @@ VIDEO_BITRATE_PRESETS = {
     "极高画质 (20M)": "20M",
 }
 
+# 编码速度档位：影响 x264 / VP9 / SVT-AV1 / NVENC 的 preset
+ENCODE_SPEED_PRESETS = [
+    {"label": "极速（体积较大）", "value": "ultrafast"},
+    {"label": "快速（推荐）", "value": "veryfast"},
+    {"label": "均衡", "value": "fast"},
+    {"label": "质量优先", "value": "medium"},
+]
+
 EXTRACT_AUDIO_FORMATS = {
     "mp3":  {"ext": ".mp3",  "desc": "MP3 — 有损压缩 (最通用)"},
     "wav":  {"ext": ".wav",  "desc": "WAV — 无损未压缩"},
@@ -161,5 +169,6 @@ def formats_info() -> dict:
             "video_bitrate": [{"label": label, "value": value} for label, value in VIDEO_BITRATE_PRESETS.items()],
             "audio_bitrate": [{"label": label, "value": value} for label, value in AUDIO_BITRATE_PRESETS.items()],
             "hardware_accel": HARDWARE_ACCEL_PRESETS,
+            "encode_speed": ENCODE_SPEED_PRESETS,
         },
     }

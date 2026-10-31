@@ -142,7 +142,8 @@ const outputDir = ref("");
 const bitrate = ref<string | number>("__auto__");
 const sampleRate = ref<string | number>("__keep__");
 const channels = ref<string | number>("__keep__");
-const normalize = ref(true); // 对齐 AudioConversionTask.normalize 默认 True
+const normalize = ref(false); // 默认关闭：避免无谓的 loudnorm 重编码
+const segmented = ref(true); // 超长文件自动分段并行编码
 
 // 输出格式下拉：不支持的格式置灰禁用，label 加"（不支持）"后缀，
 // hover 时用原生 title 展示 unsupported_reason 完整文案
@@ -239,6 +240,7 @@ async function startConversion(): Promise<void> {
       sample_rate: restoreNull(sampleRate.value),
       channels: restoreNull(channels.value),
       normalize: normalize.value,
+      segmented: segmented.value,
     },
     overwrite: false,
   };
@@ -416,6 +418,10 @@ onUnmounted(() => {
             <n-form-item label="归一化">
               <n-checkbox v-model:checked="normalize">音量归一化 (Normalize)</n-checkbox>
               <span class="norm-hint"><AppIcon name="alert" :size="13" class="hint-ico" /> loudnorm 滤镜很耗 CPU，开启后转换可能慢约一倍</span>
+            </n-form-item>
+            <n-form-item label="长文件">
+              <n-checkbox v-model:checked="segmented">超长文件分段并行编码</n-checkbox>
+              <span class="norm-hint">超过 5 分钟自动分段（最多 4 段）；音量归一化开启时不分段</span>
             </n-form-item>
           </n-form>
         </n-card>

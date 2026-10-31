@@ -115,6 +115,7 @@ def main() -> None:
         "--name", bin_name,
         "--collect-all", "av",
         "--collect-all", "PIL",
+        "--collect-all", "imageio_ffmpeg",
         "--collect-submodules", "backend",
         "--add-data", add_data,
         "--paths", root,
